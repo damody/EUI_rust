@@ -88,8 +88,7 @@ EUI/
 
 ## 当前结构上的结论
 
-- 窗口管理已经从单一大文件里拆出。
-- 渲染主线已经收敛到 modern GL。
+- 渲染主线 modern GL。
 - `GLFW` / `SDL2` 是平台层差异，不再各自维护一套 renderer。
 - `GLES` 是 OpenGL 主线下的兼容分支。
 - `Vulkan` 仍然未进入当前稳定实现范围。
