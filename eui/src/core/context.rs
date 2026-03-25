@@ -250,6 +250,14 @@ impl Context {
         self.brush_payloads.push(brush);
         let color = match brush.kind {
             BrushKind::Solid => Color::new(brush.solid.r, brush.solid.g, brush.solid.b, brush.solid.a),
+            BrushKind::LinearGradient if brush.linear.stop_count > 0 => {
+                let c = &brush.linear.stops[0].color;
+                Color::new(c.r, c.g, c.b, c.a)
+            }
+            BrushKind::RadialGradient if brush.radial.stop_count > 0 => {
+                let c = &brush.radial.stops[0].color;
+                Color::new(c.r, c.g, c.b, c.a)
+            }
             _ => Color::WHITE,
         };
         self.push_command(DrawCommand {
@@ -299,11 +307,8 @@ impl Context {
             return;
         }
 
-        let line_h = if let Some(ref measurer) = self.text_measurer {
-            measurer.line_height(font_size)
-        } else {
-            font_size * 1.2
-        };
+        // Match C++ text_area: line_h = text_font + 5.0
+        let line_h = font_size + 5.0;
 
         let mut y = rect.y;
         let bytes = text.as_bytes();
