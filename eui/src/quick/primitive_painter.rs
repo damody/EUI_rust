@@ -52,24 +52,26 @@ pub fn resolve_icon_rect(prim: &IconPrimitive) -> Rect {
 
 pub fn paint_shadow_approx(ctx: &mut Context, rect: &Rect, radius: f32, shadow: &Shadow, opacity: f32) {
     let blur = shadow.blur_radius.max(0.0);
-    if blur <= 0.0 && shadow.spread <= 0.0 {
+    let spread = shadow.spread.max(0.0);
+    if blur <= 0.0 && spread <= 0.0 {
         return;
     }
 
-    let layers = ((blur / 4.5) as i32 + 6).clamp(6, 16);
+    // Match C++ paint_shadow exactly: layers = clamp(int(blur/8)+2, 2, 6)
+    let layers = ((blur / 8.0) as i32 + 2).clamp(2, 6);
     let base = Color::new(shadow.color.r, shadow.color.g, shadow.color.b, shadow.color.a);
     for i in (1..=layers).rev() {
         let t = i as f32 / layers as f32;
-        let grow = (shadow.spread + blur * (0.10 + t * 0.82)).max(0.0);
+        let grow = spread + blur * t * 0.55;
         let layer = Rect {
             x: rect.x + shadow.offset_x - grow,
             y: rect.y + shadow.offset_y - grow,
             w: rect.w + grow * 2.0,
             h: rect.h + grow * 2.0,
         };
-        let a = (base.a * opacity * (0.54 / layers as f32) * (1.08 - 0.38 * t)).clamp(0.0, 1.0);
+        let a = opacity * (0.16 / layers as f32) * (1.12 - 0.72 * t);
         let layer_color = rgba(base.r, base.g, base.b, a);
-        ctx.paint_filled_rect(layer, layer_color, (radius + grow * 0.56).max(0.0));
+        ctx.paint_filled_rect(layer, layer_color, (radius + grow * 0.45).max(0.0));
     }
 }
 
