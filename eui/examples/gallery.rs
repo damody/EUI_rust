@@ -715,8 +715,12 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     let is_selected = state.controls_mode == i;
                     let bg = if is_selected { nav_selected_fill(&p) } else { p.surface_deep };
                     let border = if is_selected { p.accent } else { p.border_soft };
-                    draw_fill(ctx, rows[i + 1], bg, rows[i + 1].h * 0.5, 0.96);
-                    draw_stroke(ctx, rows[i + 1], border, rows[i + 1].h * 0.5, 1.0, 0.88);
+                    let radius = rows[i + 1].h * 0.5;
+                    if is_selected {
+                        ctx.paint_soft_glow(rows[i + 1], color_from_hex(p.accent, 1.0), radius, 0.26, 5.0);
+                    }
+                    draw_fill(ctx, rows[i + 1], bg, radius, 0.96);
+                    draw_stroke(ctx, rows[i + 1], border, radius, 1.0, 0.88);
                     draw_text_center(ctx, control_modes[i], rows[i + 1], font_body(s), if is_selected { p.text } else { p.muted }, 0.98);
                     if clicked(ctx, &rows[i + 1]) { state.controls_mode = i; }
                 }
@@ -727,8 +731,12 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     let is_on = state.controls_multi_select[i];
                     let bg = if is_on { nav_selected_fill(&p) } else { p.surface_deep };
                     let border = if is_on { p.accent } else { p.border_soft };
-                    draw_fill(ctx, rows[i + 5], bg, rows[i + 5].h * 0.5, 0.96);
-                    draw_stroke(ctx, rows[i + 5], border, rows[i + 5].h * 0.5, 1.0, 0.88);
+                    let radius = rows[i + 5].h * 0.5;
+                    if is_on {
+                        ctx.paint_soft_glow(rows[i + 5], color_from_hex(p.accent, 1.0), radius, 0.26, 5.0);
+                    }
+                    draw_fill(ctx, rows[i + 5], bg, radius, 0.96);
+                    draw_stroke(ctx, rows[i + 5], border, radius, 1.0, 0.88);
                     draw_text_center(ctx, control_toggles[i], rows[i + 5], font_body(s), if is_on { p.text } else { p.muted }, 0.98);
                     if clicked(ctx, &rows[i + 5]) { state.controls_multi_select[i] = !state.controls_multi_select[i]; }
                 }
@@ -768,7 +776,7 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                 draw_fill(ctx, dr, p.surface_deep, dr.h * 0.5, 0.96);
                 draw_stroke(ctx, dr, p.border_soft, dr.h * 0.5, 1.0, 0.88);
                 draw_text_left(ctx, &dropdown_label, Rect::new(dr.x + 12.0 * s, dr.y + (dr.h - 14.0) * 0.5, dr.w - 40.0 * s, 14.0), font_body(s), p.text, 0.98);
-                draw_text_right(ctx, ">", Rect::new(dr.x + dr.w - 32.0 * s, dr.y + (dr.h - 14.0) * 0.5, 20.0 * s, 14.0), font_body(s), p.muted, 0.96);
+                ctx.paint_chevron(Rect::new(dr.x + dr.w - 24.0 * s, dr.y + (dr.h - 10.0) * 0.5, 10.0 * s, 10.0), color_from_hex(p.muted, 0.96), 90.0);
             }
             // Row 2: Progress slider
             if rows.len() > 2 {
