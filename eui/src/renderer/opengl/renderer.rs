@@ -234,53 +234,27 @@ impl RendererBackend for OpenGlRenderer {
                         );
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
-                    CommandType::Glyph => {
-                        // Render glyph same as text (icon font characters)
-                        let start = cmd.text_offset as usize;
-                        let end = start + cmd.text_length as usize;
-                        if end <= draw_data.text_arena.len() {
-                            let text = std::str::from_utf8(&draw_data.text_arena[start..end]).unwrap_or("");
-                            if !text.is_empty() {
-                                if let Some(ref mut font_atlas) = self.font_atlas {
-                                    let gl_ref = Rc::clone(&self.gl);
-                                    let font_size = cmd.font_size;
-                                    let line_metrics = font_atlas.font.horizontal_line_metrics(font_size);
-                                    let ascent = line_metrics.map(|m| m.ascent).unwrap_or(font_size * 0.8);
-                                    let total_width: f32 = text.chars().map(|ch| font_atlas.font.metrics(ch, font_size).advance_width).sum();
-                                    let start_x = cmd.rect.x + (cmd.rect.w - total_width) * 0.5;
-                                    let baseline_y = cmd.rect.y + (cmd.rect.h - font_size) * 0.5 + ascent;
-
-                                    let mut verts = Vec::new();
-                                    let mut pen_x = start_x;
-                                    for ch in text.chars() {
-                                        let entry = font_atlas.get_or_rasterize(&gl_ref, ch, font_size);
-                                        if entry.width > 0.0 && entry.height > 0.0 {
-                                            let gx = pen_x + entry.offset_x;
-                                            let gy = baseline_y - entry.offset_y - entry.height;
-                                            push_textured_quad(
-                                                &mut verts,
-                                                gx, gy, entry.width, entry.height,
-                                                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
-                                                entry.u0, entry.v0, entry.u1, entry.v1,
-                                            );
-                                        }
-                                        pen_x += entry.advance_width;
-                                    }
-                                    let tex = font_atlas.texture;
-                                    self.flush_vertices(&verts, TextureMode::AlphaMask, Some(tex));
-                                }
-                            }
-                        }
-                    }
                     CommandType::Chevron => {
                         let mut verts = Vec::new();
                         let cx = cmd.rect.x + cmd.rect.w * 0.5;
                         let cy = cmd.rect.y + cmd.rect.h * 0.5;
                         let sz = cmd.rect.w.min(cmd.rect.h) * 0.3;
                         let c = &cmd.color;
-                        let t = 1.5;
-                        push_quad(&mut verts, cx - sz * 0.5, cy - sz, t * 1.4, sz, c.r, c.g, c.b, c.a);
-                        push_quad(&mut verts, cx - sz * 0.5, cy, t * 1.4, sz, c.r, c.g, c.b, c.a);
+                        let t = cmd.thickness.max(0.5);
+                        // Draw a V-shaped chevron pointing down (rotation=0),
+                        // rotated by cmd.rotation (in radians)
+                        let cos_r = cmd.rotation.cos();
+                        let sin_r = cmd.rotation.sin();
+                        let rotate = |dx: f32, dy: f32| -> (f32, f32) {
+                            (cx + dx * cos_r - dy * sin_r, cy + dx * sin_r + dy * cos_r)
+                        };
+                        // Left arm: from top-left to center-bottom
+                        let (x0, y0) = rotate(-sz * 0.5, -sz * 0.35);
+                        let (x1, y1) = rotate(0.0, sz * 0.35);
+                        push_quad(&mut verts, x0.min(x1), y0.min(y1), (x1 - x0).abs().max(t * 1.4), (y1 - y0).abs().max(t * 1.4), c.r, c.g, c.b, c.a);
+                        // Right arm: from center-bottom to top-right
+                        let (x2, y2) = rotate(sz * 0.5, -sz * 0.35);
+                        push_quad(&mut verts, x1.min(x2), y1.min(y2), (x2 - x1).abs().max(t * 1.4), (y2 - y1).abs().max(t * 1.4), c.r, c.g, c.b, c.a);
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
                 }

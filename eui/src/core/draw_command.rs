@@ -12,7 +12,6 @@ pub enum CommandType {
     Text,
     ImageRect,
     Chevron,
-    Glyph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

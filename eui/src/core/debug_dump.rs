@@ -57,7 +57,6 @@ fn command_type_str(ct: CommandType) -> &'static str {
         CommandType::Text => "Text",
         CommandType::ImageRect => "ImageRect",
         CommandType::Chevron => "Chevron",
-        CommandType::Glyph => "Glyph",
     }
 }
 

@@ -215,24 +215,61 @@ impl Context {
 
     // ── Paint Commands ──
 
-    fn push_command(&mut self, mut cmd: DrawCommand) -> usize {
+    /// Merge a requested clip with the clip stack, returning the effective clip.
+    fn resolve_effective_clip(&self, requested_clip: Option<&Rect>) -> (Option<Rect>, bool) {
+        let mut has_clip = false;
+        let mut effective = Rect::ZERO;
+        if let Some(req) = requested_clip {
+            effective = *req;
+            has_clip = true;
+        }
+        if let Some(stack_clip) = self.current_clip() {
+            if has_clip {
+                if let Some(merged) = context_intersect_rects(&effective, &stack_clip) {
+                    effective = merged;
+                } else {
+                    return (None, false); // fully clipped
+                }
+            } else {
+                effective = stack_clip;
+                has_clip = true;
+            }
+        }
+        if has_clip { (Some(effective), true) } else { (None, false) }
+    }
+
+    /// Apply effective clip to a command. Returns false if the command is fully clipped.
+    fn apply_clip_to_command(&self, cmd: &mut DrawCommand, requested_clip: Option<&Rect>) -> bool {
+        let (effective, has_clip) = self.resolve_effective_clip(requested_clip);
+        if !has_clip {
+            cmd.visible_rect = cmd.rect;
+            return true;
+        }
+        let effective = effective.unwrap();
+        if let Some(vis) = context_intersect_rects(&cmd.rect, &effective) {
+            cmd.has_clip = true;
+            cmd.clip_rect = effective;
+            cmd.visible_rect = vis;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn push_command_with_clip(&mut self, mut cmd: DrawCommand, requested_clip: Option<&Rect>) -> usize {
         if self.global_alpha < 1.0 {
             cmd.color.a *= self.global_alpha;
         }
-        if let Some(clip) = self.current_clip() {
-            cmd.has_clip = true;
-            cmd.clip_rect = clip;
-            if let Some(vis) = context_intersect_rects(&cmd.rect, &clip) {
-                cmd.visible_rect = vis;
-            } else {
-                cmd.visible_rect = Rect::ZERO;
-            }
-        } else {
-            cmd.visible_rect = cmd.rect;
+        if !self.apply_clip_to_command(&mut cmd, requested_clip) {
+            return usize::MAX;
         }
         let idx = self.commands.len();
         self.commands.push(cmd);
         idx
+    }
+
+    fn push_command(&mut self, cmd: DrawCommand) -> usize {
+        self.push_command_with_clip(cmd, None)
     }
 
     pub fn paint_filled_rect(&mut self, rect: Rect, color: Color, radius: f32) -> usize {
@@ -282,11 +319,12 @@ impl Context {
         })
     }
 
-    pub fn paint_text(&mut self, rect: Rect, text: &str, font_size: f32, color: Color, align: TextAlign) -> usize {
+    pub fn paint_text_clipped(&mut self, rect: Rect, text: &str, font_size: f32,
+                              color: Color, align: TextAlign, clip_rect: Option<&Rect>) -> usize {
         let offset = self.text_arena.len() as u32;
         self.text_arena.extend_from_slice(text.as_bytes());
         let length = text.len() as u32;
-        self.push_command(DrawCommand {
+        self.push_command_with_clip(DrawCommand {
             command_type: CommandType::Text,
             rect,
             color,
@@ -295,7 +333,11 @@ impl Context {
             text_offset: offset,
             text_length: length,
             ..Default::default()
-        })
+        }, clip_rect)
+    }
+
+    pub fn paint_text(&mut self, rect: Rect, text: &str, font_size: f32, color: Color, align: TextAlign) -> usize {
+        self.paint_text_clipped(rect, text, font_size, color, align, None)
     }
 
     /// Paint text with character-level wrapping, emitting one Text command per line.
@@ -404,11 +446,16 @@ impl Context {
     }
 
     pub fn paint_chevron(&mut self, rect: Rect, color: Color, rotation: f32) -> usize {
+        self.paint_chevron_ex(rect, color, rotation, 1.8)
+    }
+
+    pub fn paint_chevron_ex(&mut self, rect: Rect, color: Color, rotation: f32, thickness: f32) -> usize {
         self.push_command(DrawCommand {
             command_type: CommandType::Chevron,
             rect,
             color,
             rotation,
+            thickness,
             ..Default::default()
         })
     }
@@ -1588,19 +1635,7 @@ impl Context {
         let ch = char::from_u32(codepoint).unwrap_or('\u{FFFD}');
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
-        let offset = self.text_arena.len() as u32;
-        self.text_arena.extend_from_slice(s.as_bytes());
-        let length = s.len() as u32;
-        self.push_command(DrawCommand {
-            command_type: CommandType::Glyph,
-            rect,
-            color,
-            font_size,
-            align: TextAlign::Center,
-            text_offset: offset,
-            text_length: length,
-            ..Default::default()
-        })
+        self.paint_text_clipped(rect, s, font_size, color, TextAlign::Center, Some(&rect))
     }
 
     // ── Transform payload ──
