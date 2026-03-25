@@ -53,6 +53,12 @@ pub struct Context {
     // Memory asset registry
     pub(crate) memory_assets: HashMap<String, Arc<Vec<u8>>>,
 
+    // Global alpha
+    pub(crate) global_alpha: f32,
+
+    // Active slider tracking
+    pub(crate) active_slider_id: u64,
+
     // Hysteresis counters
     pub(crate) cmd_underuse: u32,
     pub(crate) text_underuse: u32,
@@ -82,6 +88,8 @@ impl Context {
             active_id: 0,
             focus_id: 0,
             memory_assets: HashMap::new(),
+            global_alpha: 1.0,
+            active_slider_id: 0,
             cmd_underuse: 0,
             text_underuse: 0,
         }
@@ -181,6 +189,9 @@ impl Context {
     // ── Paint Commands ──
 
     fn push_command(&mut self, mut cmd: DrawCommand) -> usize {
+        if self.global_alpha < 1.0 {
+            cmd.color.a *= self.global_alpha;
+        }
         if let Some(clip) = self.current_clip() {
             cmd.has_clip = true;
             cmd.clip_rect = clip;
@@ -538,20 +549,21 @@ impl Context {
 
     // ── Motion (animation state) ──
 
+    /// Animate a single motion channel using exponential decay matching C++ animate_motion_channel.
+    fn animate_motion_channel(current: f32, target: f32, speed: f32, dt: f32) -> f32 {
+        if (current - target).abs() <= 1.5e-3 {
+            return target;
+        }
+        let blend = 1.0 - (-speed.max(0.0) * dt).exp();
+        let next = current + (target - current) * blend;
+        if (next - target).abs() <= 1.5e-3 { target } else { next }
+    }
+
     pub fn motion(&mut self, id: u64, hovered: bool, pressed: bool) -> MotionResult {
-        let dt = self.input.time_seconds as f32;
-        let speed = 8.0;
-        let state = self.motion_states.entry(id).or_default();
-        state.last_touched_frame = self.frame_index;
-
-        let target_hover = if hovered { 1.0 } else { 0.0 };
-        let target_press = if pressed { 1.0 } else { 0.0 };
-        state.hover += (target_hover - state.hover) * (speed * dt.max(0.001)).min(1.0);
-        state.press += (target_press - state.press) * (speed * dt.max(0.001)).min(1.0);
-
+        let m = self.motion_ex(id, hovered, pressed, false, false);
         MotionResult {
-            hover: state.hover,
-            press: state.press,
+            hover: m.hover,
+            press: m.press,
         }
     }
 
@@ -566,13 +578,12 @@ impl Context {
             state.active = target;
             state.initialized = true;
         }
-        state.active += (target - state.active) * (speed * dt).min(1.0);
+        state.active = Self::animate_motion_channel(state.active, target, speed, dt);
         state.active
     }
 
     pub fn animated_value(&mut self, id: u64, target: f32) -> f32 {
         let dt = (self.input.time_seconds as f32).max(0.001);
-        let speed = 8.0;
         let state = self.motion_states.entry(id).or_default();
         state.last_touched_frame = self.frame_index;
 
@@ -580,8 +591,99 @@ impl Context {
             state.value = target;
             state.value_initialized = true;
         }
-        state.value += (target - state.value) * (speed * dt).min(1.0);
+        // Use same exponential decay as C++ update_motion_value (speed 10.0 default)
+        let blend = 1.0 - (-10.0_f32 * dt).exp();
+        state.value += (target - state.value) * blend;
         state.value
+    }
+
+    /// Full motion state with focus and active channels, matching C++ update_motion_state.
+    pub fn motion_ex(&mut self, id: u64, hovered: bool, pressed: bool, focused: bool, active: bool) -> MotionResultEx {
+        let dt = (self.input.time_seconds as f32).max(0.001);
+        let state = self.motion_states.entry(id).or_default();
+        state.last_touched_frame = self.frame_index;
+
+        let hover_target = if hovered { 1.0 } else { 0.0 };
+        let press_target = if pressed { 1.0 } else { 0.0 };
+        let focus_target = if focused { 1.0 } else { 0.0 };
+        let active_target = if active { 1.0 } else { 0.0 };
+
+        if !state.initialized {
+            state.hover = hover_target;
+            state.press = press_target;
+            state.focus = focus_target;
+            state.active = active_target;
+            state.initialized = true;
+        } else {
+            state.hover = Self::animate_motion_channel(state.hover, hover_target, if hovered { 18.0 } else { 12.0 }, dt);
+            state.press = Self::animate_motion_channel(state.press, press_target, if pressed { 28.0 } else { 18.0 }, dt);
+            state.focus = Self::animate_motion_channel(state.focus, focus_target, if focused { 16.0 } else { 11.0 }, dt);
+            state.active = Self::animate_motion_channel(state.active, active_target, if active { 14.0 } else { 10.0 }, dt);
+        }
+
+        MotionResultEx {
+            hover: state.hover,
+            press: state.press,
+            focus: state.focus,
+            active: state.active,
+        }
+    }
+
+    /// Snap a 0..1 motion value to clean steps, matching C++ snap_visual_motion.
+    pub fn snap_visual_motion(value: f32, step: f32) -> f32 {
+        let clamped = value.clamp(0.0, 1.0);
+        if step <= 1e-6 {
+            return clamped;
+        }
+        if clamped <= step * 0.5 {
+            return 0.0;
+        }
+        if clamped >= 1.0 - step * 0.5 {
+            return 1.0;
+        }
+        (clamped / step).round() * step
+    }
+
+    /// Soft glow effect matching C++ add_soft_glow_tracked.
+    pub fn paint_soft_glow(&mut self, rect: Rect, color: Color, radius: f32, intensity: f32, spread: f32) {
+        let glow = intensity.clamp(0.0, 1.0);
+        let area = rect.w.max(0.0) * rect.h.max(0.0);
+        let inner_alpha = 0.08 * glow * color.a;
+        let outer_alpha = 0.035 * glow * color.a;
+        if glow <= 1e-3 || color.a <= 1e-3 || (inner_alpha < 0.010 && outer_alpha < 0.006) {
+            return;
+        }
+        let allow_outer = outer_alpha >= 0.010 && area < 22000.0 && spread >= 4.0;
+        let inner_spread = spread * (0.30 + glow * 0.28);
+        let outer_spread = spread * (0.72 + glow * 0.48);
+        if allow_outer {
+            let outer_rect = context_expand_rect(&rect, outer_spread, outer_spread);
+            let outer_color = rgba(color.r, color.g, color.b, 0.030 * glow * color.a);
+            self.paint_filled_rect(outer_rect, outer_color, radius + outer_spread);
+        }
+        let inner_rect = context_expand_rect(&rect, inner_spread, inner_spread);
+        let inner_color = rgba(color.r, color.g, color.b, 0.074 * glow * color.a);
+        self.paint_filled_rect(inner_rect, inner_color, radius + inner_spread);
+    }
+
+    /// Input chrome (background + border with hover/focus animation), matching C++ draw_input_chrome.
+    pub fn draw_input_chrome(&mut self, id: u64, rect: Rect, hovered: bool, focused: bool,
+                              base_fill: Color, radius: f32, base_thickness: f32) {
+        let m = self.motion_ex(id, hovered, false, focused, focused);
+        let hover_v = Self::snap_visual_motion(m.hover, 1.0 / 40.0);
+        let focus_v = Self::snap_visual_motion(m.focus, 1.0 / 40.0);
+        let glow = focus_v * 0.78 + hover_v * 0.06;
+        if glow > 0.045 {
+            let primary = self.theme.primary;
+            self.paint_soft_glow(rect, primary, radius, glow, 7.0);
+        }
+        let secondary = self.theme.secondary;
+        let primary = self.theme.primary;
+        let fill = mix(base_fill, mix(secondary, primary, 0.14), hover_v * 0.08 + focus_v * 0.10);
+        let border = mix(self.theme.input_border, self.theme.focus_ring, focus_v * 0.92 + hover_v * 0.24);
+        let thickness = base_thickness + focus_v * 0.80 + hover_v * 0.06;
+        self.paint_filled_rect(rect, fill, radius);
+        self.paint_outline_rect(rect, border, radius, thickness);
     }
 
     // ── Hit testing ──
@@ -604,74 +706,356 @@ impl Context {
 
     // ── Widget helpers ──
 
+    #[allow(clippy::too_many_lines)]
     pub fn button(&mut self, id: u64, rect: Rect, label: &str, style: ButtonStyle) -> bool {
-        let hovered = self.is_hovered(&rect);
-        let pressed = hovered && self.is_mouse_down();
-        let clicked = hovered && self.is_mouse_released();
-        let m = self.motion(id, hovered, pressed);
+        let k_icon_visual_scale: f32 = 1.15;
+        let draw_label = label;
 
-        let (bg_color, text_color) = match style {
-            ButtonStyle::Primary => {
-                let bg = mix(self.theme.primary, rgba(1.0, 1.0, 1.0, 1.0), m.hover * 0.1 + m.press * 0.05);
-                (bg, self.theme.primary_text)
-            }
-            ButtonStyle::Secondary => {
-                let bg = mix(self.theme.secondary, self.theme.secondary_hover, m.hover);
-                let bg = mix(bg, self.theme.secondary_active, m.press);
-                (bg, self.theme.text)
-            }
-            ButtonStyle::Ghost => {
-                let bg = rgba(0.0, 0.0, 0.0, m.hover * 0.05 + m.press * 0.03);
-                (bg, self.theme.text)
-            }
+        // Detect force-left-align (tab prefix)
+        let (draw_label, force_left_align) = if let Some(stripped) = draw_label.strip_prefix('\t') {
+            (stripped, true)
+        } else {
+            (draw_label, false)
         };
 
-        self.paint_filled_rect(rect, bg_color, self.theme.radius);
-        let text_rect = Rect::new(rect.x, rect.y, rect.w, rect.h);
-        self.paint_text(text_rect, label, 13.0, text_color, TextAlign::Center);
+        // Detect icon-like labels (<=4 chars, all non-ASCII or non-alphanumeric)
+        let icon_like = !draw_label.is_empty()
+            && draw_label.chars().count() <= 4
+            && draw_label.chars().all(|ch| ch as u32 >= 0x80 || !ch.is_alphanumeric());
 
-        clicked
+        // Font sizing
+        let text_size = if icon_like {
+            (rect.h * 0.72 * k_icon_visual_scale).clamp(13.0, 36.0)
+        } else {
+            (rect.h * 0.38).clamp(12.0, 34.0)
+        };
+
+        // Icon+text combo detection
+        let mut icon_text_combo = false;
+        let mut icon_part = "";
+        let mut text_part = "";
+        if !draw_label.is_empty() {
+            let first_ch = draw_label.chars().next().unwrap();
+            if first_ch as u32 >= 0x80 {
+                // Find split point (double-space or single space)
+                let split = draw_label.find("  ").or_else(|| draw_label.find(' '));
+                if let Some(split_pos) = split {
+                    if split_pos > 0 {
+                        let text_start_pos = draw_label[split_pos..].find(|c: char| c != ' ');
+                        if let Some(ts) = text_start_pos {
+                            let ts = split_pos + ts;
+                            if ts < draw_label.len() {
+                                icon_part = &draw_label[..split_pos];
+                                text_part = &draw_label[ts..];
+                                icon_text_combo = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Colors
+        let hovered = self.is_hovered(&rect);
+        let held = hovered && self.is_mouse_down();
+
+        let mut fill = match style {
+            ButtonStyle::Primary => self.theme.primary,
+            ButtonStyle::Secondary => self.theme.secondary,
+            ButtonStyle::Ghost => {
+                if hovered {
+                    mix(self.theme.secondary, self.theme.panel, 0.5)
+                } else {
+                    self.theme.panel
+                }
+            }
+        };
+        let text_color = match style {
+            ButtonStyle::Primary => self.theme.primary_text,
+            ButtonStyle::Secondary | ButtonStyle::Ghost => self.theme.text,
+        };
+
+        if held {
+            fill = mix(fill, self.theme.secondary_active, 0.35);
+        } else if hovered && style != ButtonStyle::Ghost {
+            fill = mix(fill, self.theme.secondary_hover, 0.30);
+        }
+
+        // Motion
+        let m = self.motion_ex(id, hovered, held, false, false);
+        let hover_v = Self::snap_visual_motion(m.hover, 1.0 / 48.0);
+        let press_v = Self::snap_visual_motion(m.press, 1.0 / 36.0);
+
+        // Visual transforms
+        let visual_scale = 1.0 - press_v * 0.018;
+        let mut visual_rect = context_scale_rect_from_center(&rect, visual_scale, visual_scale);
+        visual_rect = context_translate_rect(&visual_rect, 0.0, press_v * 0.4);
+
+        let outline_color = match style {
+            ButtonStyle::Primary => mix(self.theme.primary, self.theme.focus_ring, hover_v * 0.26 + press_v * 0.12),
+            _ => mix(self.theme.outline, self.theme.focus_ring, hover_v * 0.26 + press_v * 0.12),
+        };
+
+        let radius = self.theme.radius;
+        let primary = self.theme.primary;
+        let secondary = self.theme.secondary;
+        let panel = self.theme.panel;
+
+        if style == ButtonStyle::Primary {
+            fill = mix(fill, panel, hover_v * 0.12);
+            self.paint_soft_glow(visual_rect, primary, radius, hover_v * 0.54 + press_v * 0.14, 6.5);
+        } else {
+            fill = mix(fill, panel, hover_v * 0.05);
+            self.paint_soft_glow(visual_rect, mix(primary, secondary, 0.52), radius, hover_v * 0.12, 5.0);
+        }
+
+        self.paint_filled_rect(visual_rect, fill, radius);
+        self.paint_outline_rect(visual_rect, outline_color, radius, 1.0 + hover_v * 0.14);
+
+        // Text rendering
+        if icon_text_combo {
+            let pad = if force_left_align {
+                (visual_rect.h * 0.24).clamp(9.0, 14.0)
+            } else {
+                (visual_rect.h * 0.24).clamp(8.0, 14.0)
+            };
+            let icon_size = if force_left_align {
+                (visual_rect.h * 0.46 * k_icon_visual_scale).clamp(10.0, 24.0)
+            } else {
+                (visual_rect.h * 0.60 * k_icon_visual_scale).clamp(12.0, 36.0)
+            };
+            let icon_w = if force_left_align {
+                (icon_size + 2.0).max(visual_rect.h * 0.44)
+            } else {
+                14.0_f32.max(visual_rect.h - pad * 0.2)
+            };
+            let icon_rect = Rect::new(visual_rect.x + pad, visual_rect.y, icon_w, visual_rect.h);
+            let gap = if force_left_align {
+                6.0_f32.max(pad * 0.58)
+            } else {
+                4.0_f32.max(pad * 0.45)
+            };
+            let text_x = icon_rect.x + icon_rect.w + gap;
+            let text_rect_w = (visual_rect.x + visual_rect.w - text_x - pad).max(0.0);
+            let combo_text_size = if force_left_align {
+                (visual_rect.h * 0.37).clamp(12.0, 30.0)
+            } else {
+                (visual_rect.h * 0.35).clamp(11.0, 30.0)
+            };
+            self.paint_text(icon_rect, icon_part, icon_size, text_color, TextAlign::Center);
+            self.paint_text(
+                Rect::new(text_x, visual_rect.y, text_rect_w, visual_rect.h),
+                text_part, combo_text_size, text_color, TextAlign::Left,
+            );
+        } else if force_left_align {
+            let pad = (visual_rect.h * 0.24).clamp(8.0, 14.0);
+            self.paint_text(
+                Rect::new(visual_rect.x + pad, visual_rect.y, (visual_rect.w - pad * 1.5).max(0.0), visual_rect.h),
+                draw_label, text_size, text_color, TextAlign::Left,
+            );
+        } else {
+            self.paint_text(visual_rect, draw_label, text_size, text_color, TextAlign::Center);
+        }
+
+        hovered && self.input.mouse_pressed
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn slider(&mut self, id: u64, rect: Rect, value: &mut f32, min: f32, max: f32) -> bool {
+        let min_value = min.min(max);
+        let max_value = min.max(max);
+        let radius = self.theme.radius;
+
+        // Font sizing
+        let label_font = (rect.h * 0.36).clamp(13.0, 24.0);
+        let value_font = (label_font - 0.5_f32).max(12.0);
+        let value_padding = (rect.h * 0.15).clamp(6.0, 12.0);
+        let value_box_w = (rect.h * 1.8).clamp(64.0, 128.0);
+        let value_box = Rect::new(
+            rect.x + rect.w - value_box_w - value_padding,
+            rect.y + value_padding,
+            value_box_w,
+            rect.h - value_padding * 2.0,
+        );
+
         let hovered = self.is_hovered(&rect);
-        let range = (max - min).max(1e-6);
-        let ratio = ((*value - min) / range).clamp(0.0, 1.0);
+        let _value_hovered = value_box.contains(self.input.mouse_x, self.input.mouse_y);
 
-        // Track
-        let track_h = 4.0;
-        let track_y = rect.y + (rect.h - track_h) * 0.5;
-        let track_rect = Rect::new(rect.x, track_y, rect.w, track_h);
-        self.paint_filled_rect(track_rect, self.theme.track, 2.0);
+        // Interaction: active slider state machine
+        let mut changed = false;
+        if hovered && self.input.mouse_pressed && !_value_hovered {
+            self.active_slider_id = id;
+        }
 
-        // Fill
-        let fill_w = rect.w * ratio;
-        let fill_rect = Rect::new(rect.x, track_y, fill_w, track_h);
-        self.paint_filled_rect(fill_rect, self.theme.track_fill, 2.0);
+        if self.active_slider_id == id {
+            if self.input.mouse_down {
+                let t = ((self.input.mouse_x - rect.x) / rect.w).clamp(0.0, 1.0);
+                let new_value = min_value + (max_value - min_value) * t;
+                if (new_value - *value).abs() > 1e-6 {
+                    *value = new_value;
+                    changed = true;
+                }
+            }
+            if !self.input.mouse_down || self.input.mouse_released {
+                self.active_slider_id = 0;
+            }
+        }
+
+        // Fill calculation matching C++
+        let range = (max_value - min_value).max(1e-6);
+        let t = ((*value - min_value) / range).clamp(0.0, 1.0);
+        let inner_x = rect.x + 1.0;
+        let inner_y = rect.y + 1.0;
+        let inner_w = (rect.w - 2.0).max(0.0);
+        let inner_h = (rect.h - 2.0).max(0.0);
+        let thumb_w = (rect.h * 0.24).clamp(4.0, 10.0);
+        let _thumb_center_x = inner_x + inner_w * t;
+        let thumb_x = (_thumb_center_x - thumb_w * 0.5).clamp(inner_x, inner_x + (inner_w - thumb_w).max(0.0));
+        let mut fill_right = inner_x + inner_w * t;
+        if t > 1e-4 {
+            fill_right = (inner_x + inner_w).min(fill_right + thumb_w * 0.25);
+        }
+        if t >= 0.9999 {
+            fill_right = inner_x + inner_w;
+        }
+        let fill = Rect::new(inner_x, inner_y, (fill_right - inner_x).max(0.0), inner_h);
+        let thumb = Rect::new(thumb_x, inner_y, thumb_w, inner_h);
+
+        // Motion
+        let is_active = self.active_slider_id == id;
+        let thumb_hovered = thumb.contains(self.input.mouse_x, self.input.mouse_y);
+        let slider_m = self.motion_ex(
+            context_hash_mix(id, 0x1a2b3c4d5e6f7003),
+            hovered, is_active && self.input.mouse_down, false, is_active,
+        );
+        let thumb_m = self.motion_ex(
+            context_hash_mix(id, 0x1a2b3c4d5e6f7004),
+            thumb_hovered, is_active && self.input.mouse_down, false, is_active,
+        );
+        let slider_hover_v = Self::snap_visual_motion(slider_m.hover, 1.0 / 48.0);
+        let _slider_active_v = Self::snap_visual_motion(slider_m.active, 1.0 / 40.0);
+        let thumb_hover_v = Self::snap_visual_motion(thumb_m.hover, 1.0 / 48.0);
+        let thumb_active_v = Self::snap_visual_motion(thumb_m.active, 1.0 / 36.0);
+
+        // Background
+        let panel = self.theme.panel;
+        let secondary = self.theme.secondary;
+        let primary = self.theme.primary;
+        let outline_col = self.theme.outline;
+
+        self.paint_filled_rect(rect, mix(secondary, panel, slider_hover_v * 0.05), radius);
+
+        // Fill bar
+        if fill.w > 0.0 && fill.h > 0.0 {
+            let fill_radius = (radius - 1.0).min(fill.h * 0.5).min(fill.w * 0.5).max(0.0);
+            self.paint_filled_rect(fill, mix(primary, secondary, 0.75), fill_radius);
+        }
+
+        // Outline
+        self.paint_outline_rect(
+            rect,
+            mix(outline_col, primary, slider_hover_v * 0.44 + _slider_active_v * 0.16),
+            radius, 1.0 + slider_hover_v * 0.08,
+        );
 
         // Thumb
-        let thumb_r = 8.0;
-        let thumb_x = rect.x + fill_w - thumb_r;
-        let thumb_rect = Rect::new(thumb_x, rect.y + (rect.h - thumb_r * 2.0) * 0.5, thumb_r * 2.0, thumb_r * 2.0);
-        let m = self.motion(id, hovered, hovered && self.is_mouse_down());
-        let thumb_color = mix(self.theme.primary, rgba(1.0, 1.0, 1.0, 1.0), m.hover * 0.15);
-        self.paint_filled_rect(thumb_rect, thumb_color, thumb_r);
+        let thumb_radius = (radius - 1.0).min(thumb.w.min(thumb.h) * 0.5).max(0.0);
+        let thumb_color = if is_active {
+            mix(primary, panel, 0.18)
+        } else if thumb_hovered {
+            mix(primary, panel, 0.10)
+        } else {
+            primary
+        };
+        let thumb_scale = 1.0 + thumb_active_v * 0.05;
+        let visual_thumb = context_scale_rect_from_center(&thumb, thumb_scale, thumb_scale);
+        self.paint_soft_glow(visual_thumb, primary, thumb_radius, thumb_hover_v * 0.14 + thumb_active_v * 0.18, 3.6);
+        self.paint_filled_rect(visual_thumb, thumb_color, thumb_radius);
 
-        // Interaction
-        let mut changed = false;
-        if hovered && self.is_mouse_down() {
-            let new_ratio = ((self.input.mouse_x - rect.x) / rect.w).clamp(0.0, 1.0);
-            *value = min + new_ratio * range;
-            changed = true;
-        }
+        // Value box chrome + text
+        let input_bg = self.theme.input_bg;
+        let muted_text = self.theme.muted_text;
+        self.draw_input_chrome(
+            context_hash_mix(id, 0x1a2b3c4d5e6f7005),
+            value_box, _value_hovered, false,
+            mix(input_bg, secondary, 0.25),
+            (radius - 2.0).max(0.0), 1.0,
+        );
+
+        // Value text (non-editing mode)
+        let value_text = format!("{:.2}", *value);
+        self.paint_text(
+            Rect::new(value_box.x + value_padding, value_box.y,
+                       value_box.w - value_padding * 2.0, value_box.h),
+            &value_text, value_font, muted_text, TextAlign::Right,
+        );
+
         changed
     }
 
-    pub fn progress(&mut self, rect: Rect, value: f32) {
+    pub fn progress(&mut self, id: u64, rect: Rect, label: &str, value: f32, height: f32) {
         let ratio = value.clamp(0.0, 1.0);
-        self.paint_filled_rect(rect, self.theme.track, 4.0);
-        let fill_rect = Rect::new(rect.x, rect.y, rect.w * ratio, rect.h);
-        self.paint_filled_rect(fill_rect, self.theme.track_fill, 4.0);
+
+        // Animated ratio
+        let animated_ratio = self.animated_value(id, ratio);
+
+        // Text sizing
+        let label_h = (height * 1.6).clamp(14.0, 26.0);
+        let text_gap = 8.0_f32.max(label_h + 4.0);
+
+        // Label text (left 70%)
+        if !label.is_empty() {
+            let muted = self.theme.muted_text;
+            self.paint_text(
+                Rect::new(rect.x, rect.y, rect.w * 0.7, label_h),
+                label, label_h, muted, TextAlign::Left,
+            );
+
+            // Percentage text (right 30%)
+            let pct = format!("{:.0}%", ratio * 100.0);
+            let text_col = self.theme.text;
+            self.paint_text(
+                Rect::new(rect.x + rect.w * 0.7, rect.y, rect.w * 0.3, label_h),
+                &pct, label_h, text_col, TextAlign::Right,
+            );
+        }
+
+        // Track
+        let track = Rect::new(rect.x, rect.y + text_gap, rect.w, height.max(4.0));
+        let track_radius = track.h * 0.5;
+        let track_col = self.theme.track;
+        self.paint_filled_rect(track, track_col, track_radius);
+
+        // Fill with 1px padding
+        let fill = Rect::new(
+            track.x + 1.0,
+            track.y + 1.0,
+            (track.w * animated_ratio - 2.0).max(0.0),
+            (track.h - 2.0).max(0.0),
+        );
+        if fill.w > 0.0 && fill.h > 0.0 {
+            let fill_radius = (track_radius - 1.0).min(fill.h * 0.5).min(fill.w * 0.5).max(0.0);
+            let fill_col = self.theme.track_fill;
+            self.paint_soft_glow(fill, fill_col, fill_radius, animated_ratio.min(1.0) * 0.22, 4.5);
+            self.paint_filled_rect(fill, fill_col, fill_radius);
+        }
+    }
+
+    /// Simple progress bar without label (backwards-compatible)
+    pub fn progress_bar(&mut self, rect: Rect, value: f32) {
+        let ratio = value.clamp(0.0, 1.0);
+        let track_radius = rect.h * 0.5;
+        self.paint_filled_rect(rect, self.theme.track, track_radius);
+        let fill = Rect::new(
+            rect.x + 1.0,
+            rect.y + 1.0,
+            (rect.w * ratio - 2.0).max(0.0),
+            (rect.h - 2.0).max(0.0),
+        );
+        if fill.w > 0.0 && fill.h > 0.0 {
+            let fill_radius = (track_radius - 1.0).min(fill.h * 0.5).min(fill.w * 0.5).max(0.0);
+            self.paint_filled_rect(fill, self.theme.track_fill, fill_radius);
+        }
     }
 
     // ── Text measurement ──
@@ -711,12 +1095,20 @@ impl Context {
         self.theme = theme;
     }
 
+    pub fn set_corner_radius(&mut self, radius: f32) {
+        self.theme.radius = radius.clamp(0.0, 28.0);
+    }
+
     pub fn input(&self) -> &InputState {
         &self.input
     }
 
     pub fn viewport_size(&self) -> (f32, f32) {
         (self.viewport_w, self.viewport_h)
+    }
+
+    pub fn dpi_scale(&self) -> f32 {
+        self.dpi_scale
     }
 
     // ── Memory assets ──
@@ -790,68 +1182,201 @@ impl Context {
     // ── Text Input ──
 
     pub fn text_input_field(&mut self, id: u64, rect: Rect, text: &mut String) -> bool {
-        let hovered = self.is_hovered(&rect);
-        let clicked = hovered && self.is_mouse_pressed();
-        let focused = self.focus_id == id;
+        self.text_input_field_ex(id, rect, "", text, "")
+    }
 
-        if clicked {
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_input_field_ex(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str) -> bool {
+        // Font sizing matching C++
+        let label_font = (rect.h * 0.40).clamp(13.0, 24.0);
+        let value_font = (label_font - 0.5_f32).max(12.0);
+        let input_padding = (rect.h * 0.18).clamp(6.0, 12.0);
+        let has_label = !label.is_empty();
+        let content_padding = input_padding;
+
+        let label_rect = if has_label {
+            Rect::new(rect.x, rect.y, rect.w * 0.34, rect.h)
+        } else {
+            Rect::new(rect.x, rect.y, 0.0, rect.h)
+        };
+        let input_rect = if has_label {
+            Rect::new(rect.x + rect.w * 0.36, rect.y + input_padding * 0.5,
+                       rect.w * 0.64, rect.h - input_padding)
+        } else {
+            Rect::new(rect.x, rect.y + input_padding * 0.5,
+                       rect.w, rect.h - input_padding)
+        };
+
+        // Label
+        if has_label {
+            let text_col = self.theme.text;
+            self.paint_text(label_rect, label, label_font, text_col, TextAlign::Left);
+        }
+
+        let hovered = input_rect.contains(self.input.mouse_x, self.input.mouse_y);
+        let _focused = self.focus_id == id;
+
+        if hovered && self.input.mouse_pressed {
             self.focus_id = id;
         }
 
-        let m = self.motion(id, hovered, false);
-
-        // Background
-        self.paint_filled_rect(rect, self.theme.input_bg, self.theme.radius);
-
-        // Border
-        let border_color = if focused {
-            self.theme.focus_ring
-        } else {
-            mix(self.theme.input_border, self.theme.primary, m.hover * 0.3)
-        };
-        self.paint_outline_rect(rect, border_color, self.theme.radius, 1.0);
-
-        // Text
-        let text_rect = Rect::new(rect.x + 8.0, rect.y, rect.w - 16.0, rect.h);
-        self.paint_text(text_rect, text, 13.0, self.theme.text, TextAlign::Left);
-
-        // Handle input
+        // Handle input when focused
         let mut changed = false;
-        if focused {
+        let editing = self.focus_id == id;
+        if editing {
             if !self.input.text_input.is_empty() {
                 text.push_str(&self.input.text_input);
+                // Enforce 256 char limit
+                if text.len() > 256 {
+                    text.truncate(256);
+                }
                 changed = true;
             }
             if self.input.key_backspace && !text.is_empty() {
                 text.pop();
                 changed = true;
             }
+            if self.input.key_escape || self.input.key_enter || (self.input.mouse_pressed && !hovered) {
+                self.focus_id = 0;
+            }
+        }
+
+        // Input chrome
+        let input_bg = self.theme.input_bg;
+        let chrome_radius = (self.theme.radius - 2.0).max(0.0);
+        self.draw_input_chrome(
+            context_hash_mix(id, 0x1a2b3c4d5e6f7007),
+            input_rect, hovered || editing, editing,
+            input_bg, chrome_radius, if editing { 1.2 } else { 1.0 },
+        );
+
+        // Text content
+        let text_col = self.theme.text;
+        let muted_col = self.theme.muted_text;
+        if text.is_empty() && !placeholder.is_empty() && !editing {
+            self.paint_text(
+                Rect::new(input_rect.x + content_padding, input_rect.y,
+                           (input_rect.w - content_padding * 2.0).max(0.0), input_rect.h),
+                placeholder, value_font, muted_col, TextAlign::Left,
+            );
+        } else {
+            self.paint_text(
+                Rect::new(input_rect.x + content_padding, input_rect.y,
+                           (input_rect.w - content_padding * 2.0).max(0.0), input_rect.h),
+                text, value_font, text_col, TextAlign::Left,
+            );
         }
 
         changed
+    }
+
+    // ── Input Readonly ──
+
+    pub fn input_readonly(&mut self, id: u64, rect: Rect, label: &str, value: &str) {
+        self.input_readonly_ex(id, rect, label, value, false, 1.0, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn input_readonly_ex(&mut self, id: u64, rect: Rect, label: &str, value: &str,
+                              align_right: bool, value_font_scale: f32, muted: bool) {
+        let label_font = (rect.h * 0.40).clamp(13.0, 24.0);
+        let base_value_font = (rect.h * 0.44).clamp(12.0, 56.0);
+        let scale = value_font_scale.clamp(0.5, 2.2);
+        let value_font = (base_value_font * scale).clamp(12.0, 72.0);
+        let input_padding = (rect.h * 0.18).clamp(6.0, 12.0);
+        let has_label = !label.is_empty();
+
+        let label_rect = Rect::new(rect.x, rect.y,
+                                    if has_label { rect.w * 0.34 } else { 0.0 }, rect.h);
+        let input_rect = if has_label {
+            Rect::new(rect.x + rect.w * 0.36, rect.y + input_padding * 0.5,
+                       rect.w * 0.64, rect.h - input_padding)
+        } else {
+            Rect::new(rect.x, rect.y + input_padding * 0.5,
+                       rect.w, rect.h - input_padding)
+        };
+
+        if has_label {
+            let text_col = self.theme.text;
+            self.paint_text(label_rect, label, label_font, text_col, TextAlign::Left);
+        }
+
+        let hovered = input_rect.contains(self.input.mouse_x, self.input.mouse_y);
+        let input_bg = self.theme.input_bg;
+        let secondary = self.theme.secondary;
+        let chrome_radius = (self.theme.radius - 2.0).max(0.0);
+        self.draw_input_chrome(
+            context_hash_mix(id, 0x1a2b3c4d5e6f7008),
+            input_rect, hovered, false,
+            mix(input_bg, secondary, 0.08), chrome_radius, 1.0,
+        );
+
+        // Value text content matching C++ draw_static_input_content
+        let content_rect = Rect::new(
+            input_rect.x + input_padding,
+            input_rect.y + 2.0,
+            (input_rect.w - input_padding * 2.0).max(0.0),
+            (input_rect.h - 4.0).max(0.0),
+        );
+        let text_color = if muted { self.theme.muted_text } else { self.theme.text };
+        let align = if align_right { TextAlign::Right } else { TextAlign::Left };
+        self.paint_text(content_rect, value, value_font, text_color, align);
     }
 
     // ── Dropdown ──
 
     pub fn dropdown(&mut self, id: u64, rect: Rect, items: &[&str], selected: &mut usize) -> bool {
         let hovered = self.is_hovered(&rect);
-        let m = self.motion(id, hovered, hovered && self.is_mouse_down());
+        let held = hovered && self.is_mouse_down();
 
-        let bg = mix(self.theme.secondary, self.theme.secondary_hover, m.hover);
-        self.paint_filled_rect(rect, bg, self.theme.radius);
-        self.paint_outline_rect(rect, self.theme.outline, self.theme.radius, 1.0);
+        // Dynamic font sizing matching C++
+        let header_font = (rect.h * 0.38).clamp(13.0, 24.0);
+        let header_pad = (rect.h * 0.28).clamp(10.0, 22.0);
+        let indicator_size = (rect.h * 0.34).clamp(10.0, 18.0);
 
+        // 4-channel motion
+        let m = self.motion_ex(id, hovered, held, false, false);
+        let hover_v = Self::snap_visual_motion(m.hover, 1.0 / 48.0);
+        let active_v = Self::snap_visual_motion(m.active, 1.0 / 40.0);
+
+        // Fill color matching C++
+        let panel = self.theme.panel;
+        let secondary_hover = self.theme.secondary_hover;
+        let fill = mix(panel, secondary_hover, hover_v * 0.32 + active_v * 0.08);
+        let primary = self.theme.primary;
+        let radius = self.theme.radius;
+
+        // Soft glow
+        self.paint_soft_glow(rect, primary, radius, active_v * 0.26 + hover_v * 0.10, 5.0);
+
+        self.paint_filled_rect(rect, fill, radius);
+
+        // Outline
+        let outline_color = mix(self.theme.outline, self.theme.focus_ring,
+                                 hover_v * 0.20 + active_v * 0.18);
+        self.paint_outline_rect(rect, outline_color, radius, 1.0 + hover_v * 0.10);
+
+        // Label text
         let label = if *selected < items.len() { items[*selected] } else { "" };
-        let text_rect = Rect::new(rect.x + 8.0, rect.y, rect.w - 32.0, rect.h);
-        self.paint_text(text_rect, label, 13.0, self.theme.text, TextAlign::Left);
+        let text_rect = Rect::new(rect.x + header_pad, rect.y,
+                                   rect.w - header_pad * 2.0 - indicator_size - 4.0, rect.h);
+        let text_col = self.theme.text;
+        self.paint_text(text_rect, label, header_font, text_col, TextAlign::Left);
 
-        // Chevron
-        let chevron_rect = Rect::new(rect.x + rect.w - 24.0, rect.y + (rect.h - 16.0) * 0.5, 16.0, 16.0);
-        self.paint_chevron(chevron_rect, self.theme.muted_text, 90.0);
+        // Chevron with animated color
+        let chevron_size = indicator_size;
+        let chevron_rect = Rect::new(
+            rect.x + rect.w - header_pad - chevron_size,
+            rect.y + (rect.h - chevron_size) * 0.5,
+            chevron_size, chevron_size,
+        );
+        let chevron_color = mix(self.theme.muted_text, self.theme.text,
+                                 active_v * 0.20 + hover_v * 0.10);
+        self.paint_chevron(chevron_rect, chevron_color, 90.0);
 
-        // Simple click-to-cycle for now
+        // Click-to-cycle
         let mut changed = false;
-        if hovered && self.is_mouse_released() && !items.is_empty() {
+        if hovered && self.input.mouse_pressed && !items.is_empty() {
             *selected = (*selected + 1) % items.len();
             changed = true;
         }
@@ -872,26 +1397,88 @@ impl Context {
             let tab_rect = Rect::new(rect.x + i as f32 * tab_w, rect.y, tab_w, rect.h);
             let is_selected = i == *selected;
             let hovered = self.is_hovered(&tab_rect);
+            let held = hovered && self.is_mouse_down();
             let tab_id = context_hash_mix(id, i as u64);
-            let m = self.motion(tab_id, hovered, hovered && self.is_mouse_down());
 
-            let bg = if is_selected {
-                mix(self.theme.primary, rgba(1.0, 1.0, 1.0, 1.0), m.hover * 0.1)
-            } else {
-                rgba(0.0, 0.0, 0.0, m.hover * 0.05)
-            };
-            let text_color = if is_selected { self.theme.primary_text } else { self.theme.muted_text };
+            // Dynamic font sizing matching C++
+            let text_size = (tab_rect.h * 0.42).clamp(13.0, 26.0);
 
-            self.paint_filled_rect(tab_rect, bg, 0.0);
-            self.paint_text(tab_rect, label, 13.0, text_color, TextAlign::Center);
+            // 4-channel motion
+            let m = self.motion_ex(tab_id, hovered, held, false, is_selected);
+            let hover_v = Self::snap_visual_motion(m.hover, 1.0 / 48.0);
+            let press_v = Self::snap_visual_motion(m.press, 1.0 / 36.0);
+            let active_v = Self::snap_visual_motion(m.active, 1.0 / 40.0);
 
-            if hovered && self.is_mouse_released() && !is_selected {
+            // Fill color (3-layer mix matching C++)
+            let primary = self.theme.primary;
+            let secondary = self.theme.secondary;
+            let panel = self.theme.panel;
+            let mut fill = mix(secondary, mix(primary, panel, 0.72), active_v);
+            fill = mix(fill, if is_selected { primary } else { self.theme.secondary_hover },
+                       hover_v * if is_selected { 0.16 } else { 0.28 });
+            fill = mix(fill, self.theme.secondary_active,
+                       press_v * if is_selected { 0.18 } else { 0.32 });
+
+            // Scale transform
+            let tab_radius = (self.theme.radius - 2.0).max(0.0);
+            let visual_scale = 1.0 + active_v * 0.004 - press_v * 0.014;
+            let mut visual_rect = context_scale_rect_from_center(&tab_rect, visual_scale, visual_scale);
+            visual_rect = context_translate_rect(&visual_rect, 0.0, press_v * 0.3);
+
+            // Soft glow
+            self.paint_soft_glow(visual_rect, primary, tab_radius, active_v * 0.34 + hover_v * 0.06, 5.0);
+
+            // Fill
+            self.paint_filled_rect(visual_rect, fill, tab_radius);
+
+            // Outline
+            let outline_base = mix(self.theme.outline, panel, 0.6);
+            let outline_color = mix(outline_base, primary, active_v * 0.78 + hover_v * 0.18);
+            self.paint_outline_rect(visual_rect, outline_color, tab_radius,
+                                     1.0 + active_v * 0.36 + hover_v * 0.06);
+
+            // Text color with animation blend
+            let text_color = mix(self.theme.muted_text, self.theme.text, 0.38 + active_v * 0.62);
+            self.paint_text(visual_rect, label, text_size, text_color, TextAlign::Center);
+
+            if hovered && self.input.mouse_pressed && !is_selected {
                 *selected = i;
                 changed = true;
             }
         }
 
         changed
+    }
+
+    // ── Global alpha ──
+
+    pub fn set_global_alpha(&mut self, alpha: f32) {
+        self.global_alpha = alpha.clamp(0.0, 1.0);
+    }
+
+    pub fn global_alpha(&self) -> f32 {
+        self.global_alpha
+    }
+
+    // ── Glyph (icon) rendering ──
+
+    pub fn paint_glyph(&mut self, rect: Rect, codepoint: u32, color: Color, font_size: f32) -> usize {
+        let ch = char::from_u32(codepoint).unwrap_or('\u{FFFD}');
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let offset = self.text_arena.len() as u32;
+        self.text_arena.extend_from_slice(s.as_bytes());
+        let length = s.len() as u32;
+        self.push_command(DrawCommand {
+            command_type: CommandType::Glyph,
+            rect,
+            color,
+            font_size,
+            align: TextAlign::Center,
+            text_offset: offset,
+            text_length: length,
+            ..Default::default()
+        })
     }
 
     // ── Transform payload ──
@@ -913,4 +1500,12 @@ impl Default for Context {
 pub struct MotionResult {
     pub hover: f32,
     pub press: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionResultEx {
+    pub hover: f32,
+    pub press: f32,
+    pub focus: f32,
+    pub active: f32,
 }
