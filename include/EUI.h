@@ -24,6 +24,7 @@
 #include "eui/core/foundation.h"
 #include "eui/core/context_state.h"
 #include "eui/core/context_utils.h"
+#include "eui/core/debug_dump.h"
 
 #if defined(EUI_PLATFORM_SDL) && !defined(EUI_PLATFORM_SDL2)
 #define EUI_PLATFORM_SDL2 1

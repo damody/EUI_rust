@@ -285,6 +285,17 @@ int run_with_sdl2(BuildUiFn&& build_ui, const AppOptions& options = {}) {
         }
         ui.take_frame(runtime.curr_commands, runtime.curr_text_arena, runtime.curr_brush_payloads,
                       runtime.curr_transform_payloads);
+        // Dump commands to JSON if P was pressed
+        if (runtime.pending_dump_json) {
+            runtime.pending_dump_json = false;
+            ::eui::debug::dump_commands_json(
+                runtime.curr_commands,
+                runtime.curr_text_arena,
+                runtime.curr_brush_payloads,
+                runtime.curr_transform_payloads,
+                "eui_dump_cpp.json");
+        }
+
         std::string clipboard_write_text;
         if (ui.consume_clipboard_write(clipboard_write_text)) {
             SDL_SetClipboardText(clipboard_write_text.c_str());

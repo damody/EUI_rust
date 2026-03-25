@@ -50,4 +50,5 @@ struct RuntimeState {
     std::uint32_t cache_inactive_frames{0u};
     bool has_cache{false};
     bool quit_requested{false};
+    bool pending_dump_json{false};
 };

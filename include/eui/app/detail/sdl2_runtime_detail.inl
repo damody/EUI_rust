@@ -35,6 +35,9 @@ inline void handle_sdl_key_event(const SDL_KeyboardEvent& key, RuntimeState& sta
         case SDLK_END:
             state.pending_end = true;
             break;
+        case SDLK_p:
+            state.pending_dump_json = true;
+            break;
         default:
             break;
     }
