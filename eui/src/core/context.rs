@@ -14,6 +14,33 @@ use crate::graphics::transforms::*;
 use crate::rect::Rect;
 use crate::text::measurement::TextMeasurer;
 
+/// Decode a single UTF-8 codepoint at byte position `pos`. Returns (codepoint, next_byte_index).
+fn decode_utf8_at(bytes: &[u8], pos: usize) -> (u32, usize) {
+    let b0 = bytes[pos] as u32;
+    if b0 < 0x80 {
+        return (b0, pos + 1);
+    }
+    if b0 < 0xC0 || pos + 1 >= bytes.len() {
+        return (0xFFFD, pos + 1);
+    }
+    let b1 = (bytes[pos + 1] & 0x3F) as u32;
+    if b0 < 0xE0 {
+        return ((b0 & 0x1F) << 6 | b1, pos + 2);
+    }
+    if pos + 2 >= bytes.len() {
+        return (0xFFFD, pos + 2);
+    }
+    let b2 = (bytes[pos + 2] & 0x3F) as u32;
+    if b0 < 0xF0 {
+        return ((b0 & 0x0F) << 12 | b1 << 6 | b2, pos + 3);
+    }
+    if pos + 3 >= bytes.len() {
+        return (0xFFFD, pos + 3);
+    }
+    let b3 = (bytes[pos + 3] & 0x3F) as u32;
+    ((b0 & 0x07) << 18 | b1 << 12 | b2 << 6 | b3, pos + 4)
+}
+
 #[allow(dead_code)]
 pub struct Context {
     // Drawing
@@ -261,6 +288,87 @@ impl Context {
             text_length: length,
             ..Default::default()
         })
+    }
+
+    /// Paint text with character-level wrapping, emitting one Text command per line.
+    /// Matches C++ `context_text_area` wrapping algorithm: character-by-character width
+    /// measurement, `\n` forces a line break, exceeding `rect.w` wraps to next line.
+    pub fn paint_text_wrapped(&mut self, rect: Rect, text: &str, font_size: f32, color: Color, align: TextAlign) {
+        let content_w = rect.w;
+        if content_w <= 0.0 || text.is_empty() {
+            return;
+        }
+
+        let line_h = if let Some(ref measurer) = self.text_measurer {
+            measurer.line_height(font_size)
+        } else {
+            font_size * 1.2
+        };
+
+        let mut y = rect.y;
+        let bytes = text.as_bytes();
+        let mut line_start: usize = 0;
+        let mut index: usize = 0;
+        let mut line_width: f32 = 0.0;
+
+        while index < bytes.len() {
+            let ch = bytes[index];
+
+            // Skip \r
+            if ch == b'\r' {
+                index += 1;
+                continue;
+            }
+
+            // Hard line break
+            if ch == b'\n' {
+                let line_text = &text[line_start..index];
+                let line_rect = Rect::new(rect.x, y, content_w, line_h);
+                if y + line_h > rect.y && y < rect.y + rect.h {
+                    self.paint_text(line_rect, line_text, font_size, color, align);
+                }
+                y += line_h;
+                index += 1;
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+
+            // Decode UTF-8 codepoint and measure advance
+            let (cp, next) = decode_utf8_at(bytes, index);
+            let advance = if let Some(ref measurer) = self.text_measurer {
+                let ch_char = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                let metrics = measurer.font().metrics(ch_char, font_size);
+                metrics.advance_width
+            } else {
+                font_size * 0.5
+            };
+
+            // Wrap if exceeds content width
+            if line_width > 0.0 && line_width + advance > content_w {
+                let line_text = &text[line_start..index];
+                let line_rect = Rect::new(rect.x, y, content_w, line_h);
+                if y + line_h > rect.y && y < rect.y + rect.h {
+                    self.paint_text(line_rect, line_text, font_size, color, align);
+                }
+                y += line_h;
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+
+            index = next;
+            line_width += advance;
+        }
+
+        // Emit final line
+        if line_start <= bytes.len() {
+            let line_text = &text[line_start..];
+            let line_rect = Rect::new(rect.x, y, content_w, line_h);
+            if y + line_h > rect.y && y < rect.y + rect.h {
+                self.paint_text(line_rect, line_text, font_size, color, align);
+            }
+        }
     }
 
     pub fn paint_image_rect(&mut self, rect: Rect, image_path: &str, fit: ImageFit, radius: f32) -> usize {
@@ -1250,21 +1358,30 @@ impl Context {
             input_bg, chrome_radius, if editing { 1.2 } else { 1.0 },
         );
 
-        // Text content
+        // Text content — use wrapped rendering for multiline text
         let text_col = self.theme.text;
         let muted_col = self.theme.muted_text;
-        if text.is_empty() && !placeholder.is_empty() && !editing {
-            self.paint_text(
-                Rect::new(input_rect.x + content_padding, input_rect.y,
-                           (input_rect.w - content_padding * 2.0).max(0.0), input_rect.h),
-                placeholder, value_font, muted_col, TextAlign::Left,
-            );
+        let is_multiline = text.contains('\n');
+        // For multiline text areas, use C++ text_area font formula: clamp(h*0.13, 13, 22)
+        let render_font = if is_multiline {
+            (input_rect.h * 0.13).clamp(13.0, 22.0)
         } else {
-            self.paint_text(
-                Rect::new(input_rect.x + content_padding, input_rect.y,
-                           (input_rect.w - content_padding * 2.0).max(0.0), input_rect.h),
-                text, value_font, text_col, TextAlign::Left,
-            );
+            value_font
+        };
+        let text_pad = if is_multiline {
+            (input_rect.h * 0.03).clamp(6.0, 10.0)
+        } else {
+            content_padding
+        };
+        let content_rect = Rect::new(input_rect.x + text_pad, input_rect.y + text_pad,
+                                      (input_rect.w - text_pad * 2.0).max(0.0),
+                                      (input_rect.h - text_pad * 2.0).max(0.0));
+        if text.is_empty() && !placeholder.is_empty() && !editing {
+            self.paint_text(content_rect, placeholder, value_font, muted_col, TextAlign::Left);
+        } else if is_multiline || self.measure_text(text, render_font) > content_rect.w {
+            self.paint_text_wrapped(content_rect, text, render_font, text_col, TextAlign::Left);
+        } else {
+            self.paint_text(content_rect, text, render_font, text_col, TextAlign::Left);
         }
 
         changed
