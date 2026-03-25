@@ -308,9 +308,6 @@ fn actor_glass_bottom(p: &GalleryPalette) -> u32 {
 fn actor_stroke(p: &GalleryPalette) -> u32 {
     if p.light { mix_hex(0xD7E6F7, p.accent, 0.18) } else { mix_hex(0xDBECFF, p.accent, 0.16) }
 }
-fn actor_inner(p: &GalleryPalette) -> u32 {
-    if p.light { 0xFFFFFF } else { 0xEFF6FF }
-}
 fn actor_outline(p: &GalleryPalette) -> u32 {
     mix_hex(p.border_soft, p.accent, if p.light { 0.24 } else { 0.18 })
 }
@@ -348,10 +345,48 @@ fn blur_reference_hexes(p: &GalleryPalette) -> [u32; 5] {
     ]
 }
 
+fn panel_shadow_hex(p: &GalleryPalette) -> u32 {
+    if p.light { 0x93A8BC } else { 0x020617 }
+}
+
 // ── Drawing helpers ──
+
+fn draw_shadow(ctx: &mut Context, r: Rect, radius: f32, offset_y: f32, blur: f32, hex: u32, alpha: f32) {
+    let shadow = Shadow {
+        offset_x: 0.0,
+        offset_y,
+        blur_radius: blur,
+        spread: 0.0,
+        color: GfxColor::from(color_from_hex(hex, 1.0)),
+    };
+    eui::quick::primitive_painter::paint_shadow_approx(ctx, &r, radius, &shadow, alpha);
+}
 
 fn draw_fill(ctx: &mut Context, r: Rect, hex: u32, radius: f32, alpha: f32) {
     ctx.paint_filled_rect(r, color_from_hex(hex, alpha), radius);
+}
+
+fn draw_gradient(ctx: &mut Context, r: Rect, top_hex: u32, bottom_hex: u32, radius: f32, alpha: f32) {
+    let top_c = color_from_hex(top_hex, alpha);
+    let bottom_c = color_from_hex(bottom_hex, alpha);
+    // Use normalized coordinates (0..1) matching C++ gfx::vertical_gradient
+    let brush = Brush {
+        kind: BrushKind::LinearGradient,
+        solid: GfxColor::from(top_c),
+        linear: eui::graphics::effects::LinearGradient {
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 0.0, y: 1.0 },
+            stops: [
+                ColorStop { position: 0.0, color: GfxColor::from(top_c) },
+                ColorStop { position: 1.0, color: GfxColor::from(bottom_c) },
+                ColorStop::default(),
+                ColorStop::default(),
+            ],
+            stop_count: 2,
+        },
+        radial: eui::graphics::effects::RadialGradient::default(),
+    };
+    ctx.paint_filled_rect_with_brush(r, brush, radius);
 }
 
 fn draw_stroke(ctx: &mut Context, r: Rect, hex: u32, radius: f32, width: f32, alpha: f32) {
@@ -403,29 +438,24 @@ fn draw_stage_background(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalet
 // ── Actor ──
 
 fn draw_actor(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u32, bottom: u32, alpha: f32) {
-    // Outer rect with gradient approximation (use top color)
-    let c = color_from_hex(mix_hex(top, bottom, 0.5), alpha);
-    ctx.paint_filled_rect(rect, c, 18.0 * s);
-    // Inner highlight
-    let inner = inset_rect(&rect, 10.0 * s, 10.0 * s);
-    let inner_c = color_from_hex(actor_inner(p), (if p.light { 0.32 } else { 0.18 }) * alpha);
-    ctx.paint_filled_rect(inner, inner_c, 10.0 * s);
+    // Shadow matching C++: shadow(0.0, 8.0*s, 20.0*s, panel_shadow_hex, light?0.08:0.12)
+    draw_shadow(ctx, rect, 18.0 * s, 8.0 * s, 20.0 * s, panel_shadow_hex(p), if p.light { 0.08 } else { 0.12 });
+    // Gradient fill matching C++: .gradient(top, bottom, alpha)
+    draw_gradient(ctx, rect, top, bottom, 18.0 * s, alpha);
     // Stroke
     draw_stroke(ctx, rect, actor_stroke(p), 18.0 * s, 1.0, 0.92 * alpha);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn draw_actor_ex(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u32, bottom: u32, alpha: f32, blur_radius: f32, fill_alpha: f32) {
+    // Shadow matching C++
+    draw_shadow(ctx, rect, 18.0 * s, 8.0 * s, 20.0 * s, panel_shadow_hex(p), if p.light { 0.08 } else { 0.12 });
     // When blur > 0, draw a backdrop blur effect behind the actor
     if blur_radius > 0.0 {
         ctx.paint_backdrop_blur(rect, blur_radius, 18.0 * s);
     }
-    // Fill uses fill_alpha (glass effect), inner+stroke use alpha
-    let c = color_from_hex(mix_hex(top, bottom, 0.5), fill_alpha);
-    ctx.paint_filled_rect(rect, c, 18.0 * s);
-    let inner = inset_rect(&rect, 10.0 * s, 10.0 * s);
-    let inner_c = color_from_hex(actor_inner(p), (if p.light { 0.32 } else { 0.18 }) * alpha);
-    ctx.paint_filled_rect(inner, inner_c, 10.0 * s);
+    // Gradient fill matching C++
+    draw_gradient(ctx, rect, top, bottom, 18.0 * s, fill_alpha);
     draw_stroke(ctx, rect, actor_stroke(p), 18.0 * s, 1.0, 0.92 * alpha);
 }
 
@@ -728,9 +758,9 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             let rows = LinearLayout::column(content).gap(8.0 * s)
                 .items(&[px(38.0 * s), px(compact_h + 2.0 * s), px(normal_h), px(normal_h), px(progress_track_h), px(compact_h), px(normal_h)]).resolve();
 
-            // Row 0: Search input
+            // Row 0: Search input (with "Search" label matching C++ ui.input("Search", ...))
             if !rows.is_empty() {
-                ctx.text_input_field(hash_str("search_input"), rows[0], &mut state.search_text);
+                ctx.text_input_field_ex(hash_str("search_input"), rows[0], "Search", &mut state.search_text, "Type to filter");
             }
             // Row 1: Density dropdown placeholder (readonly with arrow)
             if rows.len() > 1 {
@@ -776,9 +806,16 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
     // Card 4: Editor
     if cols.len() > 3 {
         draw_card(ctx, cols[3], "Editor", s, &p, |ctx, content| {
-            draw_readonly(ctx, Rect::new(content.x, content.y, content.w, 32.0 * s), "Purpose", "Multiline input", s, &p);
-            let text_area = Rect::new(content.x, content.y + 40.0 * s, content.w, (content.h - 40.0 * s).max(0.0));
-            ctx.text_input_field(hash_str("notes_area"), text_area, &mut state.notes_text);
+            draw_readonly(ctx, Rect::new(content.x, content.y, content.w, 32.0 * s), "Purpose", "Multiline input, wrapping and scroll behavior", s, &p);
+            let text_area_rect = Rect::new(content.x, content.y + 40.0 * s, content.w, (content.h - 40.0 * s).max(0.0));
+            // "Notes" label matching C++ text_area("Notes", ...) label rendering
+            let label_font = (text_area_rect.h * 0.12).clamp(12.0, 18.0);
+            let outer_pad = (text_area_rect.h * 0.04).clamp(6.0, 12.0);
+            draw_text_left(ctx, "Notes", Rect::new(text_area_rect.x + outer_pad, text_area_rect.y + outer_pad, text_area_rect.w - outer_pad * 2.0, label_font), label_font, p.muted, 1.0);
+            // Text area box below the label
+            let box_y = text_area_rect.y + outer_pad + label_font + 6.0;
+            let box_rect = Rect::new(text_area_rect.x + outer_pad, box_y, text_area_rect.w - outer_pad * 2.0, (text_area_rect.h - (label_font + outer_pad + 12.0)).max(0.0));
+            ctx.text_input_field(hash_str("notes_area"), box_rect, &mut state.notes_text);
         });
     }
 }
@@ -1562,6 +1599,8 @@ fn draw_stage(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32, t
 // ── Card helper ──
 
 fn draw_card(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPalette, body: impl FnOnce(&mut Context, Rect)) {
+    // Card shadow matching C++ panel builder: offset_y=10, blur=18, color=0x020617, alpha=0.12
+    draw_shadow(ctx, rect, 20.0 * s, 10.0, 18.0, 0x020617, 0.12);
     draw_fill(ctx, rect, p.surface_alt, 20.0 * s, 1.0);
     draw_stroke(ctx, rect, p.border, 20.0 * s, 1.0, 1.0);
     ctx.push_clip(rect);
@@ -1623,8 +1662,9 @@ fn main() {
         let margin = 18.0 * s;
         let frame_rect = Rect::new(margin, margin, (vw - margin * 2.0).max(0.0), (vh - margin * 2.0).max(0.0));
 
-        // Shell background
-        draw_fill(ctx, frame_rect, p.shell_top, 30.0 * s, 1.0);
+        // Shell background with shadow + gradient matching C++
+        draw_shadow(ctx, frame_rect, 30.0 * s, 14.0 * s, 28.0 * s, panel_shadow_hex(&p), if p.light { 0.10 } else { 0.18 });
+        draw_gradient(ctx, frame_rect, p.shell_top, p.shell_bottom, 30.0 * s, 1.0);
         draw_stroke(ctx, frame_rect, p.border, 30.0 * s, 1.0, 1.0);
 
         let shell_inner = inset_rect(&frame_rect, 18.0 * s, 18.0 * s);
