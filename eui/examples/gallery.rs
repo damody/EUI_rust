@@ -147,6 +147,16 @@ fn color_from_hex(hex: u32, alpha: f32) -> Color {
     rgb_hex(hex, alpha)
 }
 
+fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::new(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
+}
+
 fn mix_hex(a: u32, b: u32, t: f32) -> u32 {
     let t = t.clamp(0.0, 1.0);
     let mix_ch = |shift: u32| -> u32 {
@@ -394,19 +404,19 @@ fn draw_stroke(ctx: &mut Context, r: Rect, hex: u32, radius: f32, width: f32, al
 }
 
 fn draw_text_left(ctx: &mut Context, text: &str, r: Rect, font_size: f32, hex: u32, alpha: f32) {
-    ctx.paint_text(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Left);
+    ctx.paint_text_clipped(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Left, Some(&r));
 }
 
 fn draw_text_center(ctx: &mut Context, text: &str, r: Rect, font_size: f32, hex: u32, alpha: f32) {
-    ctx.paint_text(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Center);
+    ctx.paint_text_clipped(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Center, Some(&r));
 }
 
 fn draw_text_right(ctx: &mut Context, text: &str, r: Rect, font_size: f32, hex: u32, alpha: f32) {
-    ctx.paint_text(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Right);
+    ctx.paint_text_clipped(r, text, font_size, color_from_hex(hex, alpha), TextAlign::Right, Some(&r));
 }
 
 fn draw_icon(ctx: &mut Context, codepoint: u32, r: Rect, hex: u32, alpha: f32) {
-    ctx.paint_glyph(r, codepoint, color_from_hex(hex, alpha), r.h.min(r.w));
+    ctx.paint_glyph(r, codepoint, color_from_hex(hex, alpha), r.h.min(r.w) * 0.72);
 }
 
 fn hovered(ctx: &Context, r: &Rect) -> bool {
@@ -700,10 +710,18 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
         });
     }
 
-    // Card 2: Selection
+    // Card 2: Selection — match C++ ui.tab() widget rendering
     if cols.len() > 1 {
         let control_modes = ["Compact", "Balanced", "Comfortable"];
         let control_toggles = ["Toolbar", "Cards", "Blur"];
+        // Extract theme colors before the closure borrows ctx
+        let theme_secondary = ctx.theme().secondary;
+        let theme_primary = ctx.theme().primary;
+        let theme_panel = ctx.theme().panel;
+        let theme_outline = ctx.theme().outline;
+        let theme_text = ctx.theme().text;
+        let theme_muted_text = ctx.theme().muted_text;
+        let tab_radius = (ctx.theme().radius - 2.0_f32).max(0.0);
         draw_card(ctx, cols[1], "Selection", s, &p, |ctx, content| {
             let row_h = 32.0 * s;
             let rows = LinearLayout::column(content).gap(8.0 * s)
@@ -713,15 +731,21 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             for i in 0..3 {
                 if rows.len() > i + 1 {
                     let is_selected = state.controls_mode == i;
-                    let bg = if is_selected { nav_selected_fill(&p) } else { p.surface_deep };
-                    let border = if is_selected { p.accent } else { p.border_soft };
-                    let radius = rows[i + 1].h * 0.5;
+                    let active_v: f32 = if is_selected { 1.0 } else { 0.0 };
+                    // C++ fill: mix(secondary, mix(primary, panel, 0.72), active_v)
+                    let fill = mix_color(theme_secondary, mix_color(theme_primary, theme_panel, 0.72), active_v);
+                    // C++ outline: mix(mix(outline, panel, 0.6), primary, active_v * 0.78)
+                    let outline = mix_color(mix_color(theme_outline, theme_panel, 0.6), theme_primary, active_v * 0.78);
+                    let thickness = 1.0 + active_v * 0.36;
+                    let text_size = (rows[i + 1].h * 0.42).clamp(13.0, 26.0);
+                    // C++ text: mix(muted_text, text, 0.38 + active_v * 0.62)
+                    let text_color = mix_color(theme_muted_text, theme_text, 0.38 + active_v * 0.62);
                     if is_selected {
-                        ctx.paint_soft_glow(rows[i + 1], color_from_hex(p.accent, 1.0), radius, 0.26, 5.0);
+                        ctx.paint_soft_glow(rows[i + 1], theme_primary, tab_radius, active_v * 0.34, 5.0);
                     }
-                    draw_fill(ctx, rows[i + 1], bg, radius, 0.96);
-                    draw_stroke(ctx, rows[i + 1], border, radius, 1.0, 0.88);
-                    draw_text_center(ctx, control_modes[i], rows[i + 1], font_body(s), if is_selected { p.text } else { p.muted }, 0.98);
+                    ctx.paint_filled_rect(rows[i + 1], fill, tab_radius);
+                    ctx.paint_outline_rect(rows[i + 1], outline, tab_radius, thickness);
+                    ctx.paint_text_clipped(rows[i + 1], control_modes[i], text_size, text_color, TextAlign::Center, Some(&rows[i + 1]));
                     if clicked(ctx, &rows[i + 1]) { state.controls_mode = i; }
                 }
             }
@@ -729,15 +753,18 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             for i in 0..3 {
                 if rows.len() > i + 5 {
                     let is_on = state.controls_multi_select[i];
-                    let bg = if is_on { nav_selected_fill(&p) } else { p.surface_deep };
-                    let border = if is_on { p.accent } else { p.border_soft };
-                    let radius = rows[i + 5].h * 0.5;
+                    let active_v: f32 = if is_on { 1.0 } else { 0.0 };
+                    let fill = mix_color(theme_secondary, mix_color(theme_primary, theme_panel, 0.72), active_v);
+                    let outline = mix_color(mix_color(theme_outline, theme_panel, 0.6), theme_primary, active_v * 0.78);
+                    let thickness = 1.0 + active_v * 0.36;
+                    let text_size = (rows[i + 5].h * 0.42).clamp(13.0, 26.0);
+                    let text_color = mix_color(theme_muted_text, theme_text, 0.38 + active_v * 0.62);
                     if is_on {
-                        ctx.paint_soft_glow(rows[i + 5], color_from_hex(p.accent, 1.0), radius, 0.26, 5.0);
+                        ctx.paint_soft_glow(rows[i + 5], theme_primary, tab_radius, active_v * 0.34, 5.0);
                     }
-                    draw_fill(ctx, rows[i + 5], bg, radius, 0.96);
-                    draw_stroke(ctx, rows[i + 5], border, radius, 1.0, 0.88);
-                    draw_text_center(ctx, control_toggles[i], rows[i + 5], font_body(s), if is_on { p.text } else { p.muted }, 0.98);
+                    ctx.paint_filled_rect(rows[i + 5], fill, tab_radius);
+                    ctx.paint_outline_rect(rows[i + 5], outline, tab_radius, thickness);
+                    ctx.paint_text_clipped(rows[i + 5], control_toggles[i], text_size, text_color, TextAlign::Center, Some(&rows[i + 5]));
                     if clicked(ctx, &rows[i + 5]) { state.controls_multi_select[i] = !state.controls_multi_select[i]; }
                 }
             }
@@ -770,13 +797,24 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             if !rows.is_empty() {
                 ctx.text_input_field_ex(hash_str("search_input"), rows[0], "Search", &mut state.search_text, "Type to filter");
             }
-            // Row 1: Density dropdown placeholder (readonly with arrow)
+            // Row 1: Density dropdown placeholder — match C++ dropdown chrome
             if rows.len() > 1 {
                 let dr = rows[1];
-                draw_fill(ctx, dr, p.surface_deep, dr.h * 0.5, 0.96);
-                draw_stroke(ctx, dr, p.border_soft, dr.h * 0.5, 1.0, 0.88);
-                draw_text_left(ctx, &dropdown_label, Rect::new(dr.x + 12.0 * s, dr.y + (dr.h - 14.0) * 0.5, dr.w - 40.0 * s, 14.0), font_body(s), p.text, 0.98);
-                ctx.paint_chevron(Rect::new(dr.x + dr.w - 24.0 * s, dr.y + (dr.h - 10.0) * 0.5, 10.0 * s, 10.0), color_from_hex(p.muted, 0.96), 90.0);
+                let dd_radius = ctx.theme().radius;
+                let dd_fill = ctx.theme().panel;
+                let dd_outline = ctx.theme().outline;
+                let dd_text_color = ctx.theme().text;
+                let dd_muted = ctx.theme().muted_text;
+                ctx.paint_filled_rect(dr, dd_fill, dd_radius);
+                ctx.paint_outline_rect(dr, dd_outline, dd_radius, 1.0);
+                let header_font = (dr.h * 0.38).clamp(13.0, 24.0);
+                let header_pad = (dr.h * 0.28).clamp(10.0, 22.0);
+                let indicator_size = (dr.h * 0.34).clamp(10.0, 18.0);
+                let text_rect = Rect::new(dr.x + header_pad, dr.y, dr.w - header_pad * 2.0 - indicator_size - 6.0, dr.h);
+                ctx.paint_text_clipped(text_rect, &dropdown_label, header_font, dd_text_color, TextAlign::Left, Some(&text_rect));
+                let chevron_rect = Rect::new(dr.x + dr.w - header_pad - indicator_size, dr.y + (dr.h - indicator_size) * 0.5, indicator_size, indicator_size);
+                let chevron_thickness = (dr.h * 0.065).clamp(1.4, 2.4);
+                ctx.paint_chevron_ex(chevron_rect, dd_muted, 0.0, chevron_thickness);
             }
             // Row 2: Progress slider
             if rows.len() > 2 {
@@ -1508,7 +1546,6 @@ fn draw_sidebar(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32)
     let accent = accent_hex(state);
     draw_fill(ctx, rect, p.surface, 26.0 * s, 1.0);
     draw_stroke(ctx, rect, p.border, 26.0 * s, 1.0, 1.0);
-    ctx.push_clip(rect);
 
     let inner = inset_rect(&rect, 18.0 * s, 18.0 * s);
     let main_rows = LinearLayout::column(inner).gap(8.0 * s)
@@ -1559,7 +1596,6 @@ fn draw_sidebar(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32)
                 font_body(s), if is_selected { p.text } else { mix_hex(p.text, p.muted, 0.22) }, 0.98);
         }
     }
-    ctx.pop_clip();
 }
 
 // ── Stage dispatcher ──
@@ -1570,7 +1606,6 @@ fn draw_stage(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32, t
 
     draw_fill(ctx, rect, p.surface, 26.0 * s, 1.0);
     draw_stroke(ctx, rect, p.border, 26.0 * s, 1.0, 1.0);
-    ctx.push_clip(rect);
 
     let inner = inset_rect(&rect, 22.0 * s, 22.0 * s);
     let rows = LinearLayout::column(inner).gap(12.0 * s)
@@ -1601,26 +1636,30 @@ fn draw_stage(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32, t
             _ => draw_about_page(ctx, state, stage_rect, s),
         }
     }
-    ctx.pop_clip();
 }
 
 // ── Card helper ──
 
 fn draw_card(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPalette, body: impl FnOnce(&mut Context, Rect)) {
-    // Card shadow matching C++ panel builder: offset_y=10, blur=18, color=0x020617, alpha=0.12
-    draw_shadow(ctx, rect, 20.0 * s, 10.0, 18.0, 0x020617, 0.12);
-    draw_fill(ctx, rect, p.surface_alt, 20.0 * s, 1.0);
-    draw_stroke(ctx, rect, p.border, 20.0 * s, 1.0, 1.0);
-    ctx.push_clip(rect);
-    let inner = inset_rect(&rect, 16.0 * s, 16.0 * s);
+    // Card radius/padding/shadow matching C++ SurfaceBuilder(card): radius=22*s, padding=16 (unscaled), shadow(0,10,18)
+    let card_radius = 22.0 * s;
+    draw_shadow(ctx, rect, card_radius, 10.0, 18.0, 0x020617, 0.12);
+    draw_fill(ctx, rect, p.surface_alt, card_radius, 1.0);
+    draw_stroke(ctx, rect, p.border, card_radius, 1.0, 1.0);
+    // C++ SurfaceBuilder does NOT push_clip for cards
+    let inner = inset_rect(&rect, 16.0, 16.0);
     if !title.is_empty() {
-        draw_text_left(ctx, title, Rect::new(inner.x, inner.y, inner.w, 20.0 * s), font_heading(s), p.text, 0.98);
-        let body_rect = Rect::new(inner.x, inner.y + 28.0 * s, inner.w, (inner.h - 28.0 * s).max(0.0));
+        let title_font = font_heading(s);
+        let title_height = title_font + 4.0;
+        // C++ SurfaceBuilder uses framework theme text color, not gallery palette
+        let title_rect = Rect::new(inner.x, inner.y, inner.w, title_height);
+        let title_color = ctx.theme().text;
+        ctx.paint_text_clipped(title_rect, title, title_font, title_color, TextAlign::Left, Some(&title_rect));
+        let body_rect = Rect::new(inner.x, inner.y + title_height + 8.0, inner.w, (inner.h - title_height - 8.0).max(0.0));
         body(ctx, body_rect);
     } else {
         body(ctx, inner);
     }
-    ctx.pop_clip();
 }
 
 // ── Readonly helper ──
