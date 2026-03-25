@@ -1,0 +1,31 @@
+[package]
+name = "eui"
+version = "0.3.3"
+edition = "2021"
+description = "Immediate-mode UI toolkit with animation, graphics, and layout"
+
+[dependencies]
+winit = "0.30"
+glow = "0.14"
+glutin = "0.32"
+glutin-winit = "0.5"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+raw-window-handle = "0.6"
+arboard = "3"
+
+[[example]]
+name = "minimal_quick_demo"
+path = "examples/minimal_quick_demo.rs"
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+
+[[example]]
+name = "anchor_demo"
+path = "examples/anchor_demo.rs"
+
+[[example]]
+name = "dashboard_demo"
+path = "examples/dashboard_demo.rs"
