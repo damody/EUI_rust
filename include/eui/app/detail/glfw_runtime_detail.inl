@@ -64,6 +64,9 @@ inline void key_input_callback(GLFWwindow* window, int key, int /*scancode*/, in
         case GLFW_KEY_END:
             state->pending_end = true;
             break;
+        case GLFW_KEY_P:
+            state->pending_dump_json = true;
+            break;
         default:
             break;
     }
