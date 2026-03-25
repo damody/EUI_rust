@@ -27,7 +27,6 @@ pub struct OpenGlRenderer {
     texture_mode_uniform: glow::UniformLocation,
     font_atlas: Option<FontAtlas>,
     image_cache: ImageCache,
-    vertices: Vec<Vertex>,
 }
 
 impl OpenGlRenderer {
@@ -51,7 +50,6 @@ impl OpenGlRenderer {
             texture_mode_uniform,
             font_atlas: None,
             image_cache: ImageCache::new(),
-            vertices: Vec::with_capacity(4096),
         })
     }
 
@@ -147,26 +145,24 @@ impl RendererBackend for OpenGlRenderer {
 
                 match cmd.command_type {
                     CommandType::FilledRect => {
-                        self.vertices.clear();
-                        push_quad(
-                            &mut self.vertices,
+                        let mut verts = Vec::new();
+                        push_rounded_quad(
+                            &mut verts,
                             cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h,
                             cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
+                            cmd.radius,
                         );
-                        self.flush_vertices(&self.vertices.clone(), TextureMode::None, None);
-                        self.vertices.clear();
+                        self.flush_vertices(&verts, TextureMode::None, None);
                     }
                     CommandType::RectOutline => {
-                        self.vertices.clear();
-                        let t = cmd.thickness;
-                        let r = &cmd.rect;
-                        let c = &cmd.color;
-                        push_quad(&mut self.vertices, r.x, r.y, r.w, t, c.r, c.g, c.b, c.a);
-                        push_quad(&mut self.vertices, r.x, r.y + r.h - t, r.w, t, c.r, c.g, c.b, c.a);
-                        push_quad(&mut self.vertices, r.x, r.y + t, t, r.h - t * 2.0, c.r, c.g, c.b, c.a);
-                        push_quad(&mut self.vertices, r.x + r.w - t, r.y + t, t, r.h - t * 2.0, c.r, c.g, c.b, c.a);
-                        self.flush_vertices(&self.vertices.clone(), TextureMode::None, None);
-                        self.vertices.clear();
+                        let mut verts = Vec::new();
+                        push_rounded_outline(
+                            &mut verts,
+                            cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h,
+                            cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
+                            cmd.radius, cmd.thickness,
+                        );
+                        self.flush_vertices(&verts, TextureMode::None, None);
                     }
                     CommandType::Text => {
                         let start = cmd.text_offset as usize;
@@ -237,6 +233,44 @@ impl RendererBackend for OpenGlRenderer {
                             0.0, 0.0, 0.0, 0.15,
                         );
                         self.flush_vertices(&verts, TextureMode::None, None);
+                    }
+                    CommandType::Glyph => {
+                        // Render glyph same as text (icon font characters)
+                        let start = cmd.text_offset as usize;
+                        let end = start + cmd.text_length as usize;
+                        if end <= draw_data.text_arena.len() {
+                            let text = std::str::from_utf8(&draw_data.text_arena[start..end]).unwrap_or("");
+                            if !text.is_empty() {
+                                if let Some(ref mut font_atlas) = self.font_atlas {
+                                    let gl_ref = Rc::clone(&self.gl);
+                                    let font_size = cmd.font_size;
+                                    let line_metrics = font_atlas.font.horizontal_line_metrics(font_size);
+                                    let ascent = line_metrics.map(|m| m.ascent).unwrap_or(font_size * 0.8);
+                                    let total_width: f32 = text.chars().map(|ch| font_atlas.font.metrics(ch, font_size).advance_width).sum();
+                                    let start_x = cmd.rect.x + (cmd.rect.w - total_width) * 0.5;
+                                    let baseline_y = cmd.rect.y + (cmd.rect.h - font_size) * 0.5 + ascent;
+
+                                    let mut verts = Vec::new();
+                                    let mut pen_x = start_x;
+                                    for ch in text.chars() {
+                                        let entry = font_atlas.get_or_rasterize(&gl_ref, ch, font_size);
+                                        if entry.width > 0.0 && entry.height > 0.0 {
+                                            let gx = pen_x + entry.offset_x;
+                                            let gy = baseline_y - entry.offset_y - entry.height;
+                                            push_textured_quad(
+                                                &mut verts,
+                                                gx, gy, entry.width, entry.height,
+                                                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
+                                                entry.u0, entry.v0, entry.u1, entry.v1,
+                                            );
+                                        }
+                                        pen_x += entry.advance_width;
+                                    }
+                                    let tex = font_atlas.texture;
+                                    self.flush_vertices(&verts, TextureMode::AlphaMask, Some(tex));
+                                }
+                            }
+                        }
                     }
                     CommandType::Chevron => {
                         let mut verts = Vec::new();
