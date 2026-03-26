@@ -172,9 +172,6 @@ fn pack_rgb_hex(r: f32, g: f32, b: f32) -> u32 {
     (to_u8(r) << 16) | (to_u8(g) << 8) | to_u8(b)
 }
 
-fn format_percent(ratio: f32) -> String {
-    format!("{:.0}%", ratio.clamp(0.0, 1.0) * 100.0)
-}
 
 fn format_pixels(value: f32) -> String {
     format!("{:.0} px", value)
@@ -745,7 +742,7 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     }
                     ctx.paint_filled_rect(rows[i + 1], fill, tab_radius);
                     ctx.paint_outline_rect(rows[i + 1], outline, tab_radius, thickness);
-                    ctx.paint_text_clipped(rows[i + 1], control_modes[i], text_size, text_color, TextAlign::Center, Some(&rows[i + 1]));
+                    ctx.paint_text(rows[i + 1], control_modes[i], text_size, text_color, TextAlign::Center);
                     if clicked(ctx, &rows[i + 1]) { state.controls_mode = i; }
                 }
             }
@@ -764,7 +761,7 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     }
                     ctx.paint_filled_rect(rows[i + 5], fill, tab_radius);
                     ctx.paint_outline_rect(rows[i + 5], outline, tab_radius, thickness);
-                    ctx.paint_text_clipped(rows[i + 5], control_toggles[i], text_size, text_color, TextAlign::Center, Some(&rows[i + 5]));
+                    ctx.paint_text(rows[i + 5], control_toggles[i], text_size, text_color, TextAlign::Center);
                     if clicked(ctx, &rows[i + 5]) { state.controls_multi_select[i] = !state.controls_multi_select[i]; }
                 }
             }
@@ -790,8 +787,12 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             let control_modes_labels = ["Compact", "Balanced", "Comfortable"];
             let density_text = control_modes_labels[state.controls_mode.min(2)];
             let dropdown_label = format!("Density: {}", density_text);
+            // C++ dropdown_track_h = max(34, dropdown_padding*3) + (open ? body : 0)
+            let dropdown_padding = 10.0 * s;
+            let dropdown_header_h = 34.0_f32.max(dropdown_padding * 3.0);
+            let dropdown_track_h = dropdown_header_h; // closed state
             let rows = LinearLayout::column(content).gap(8.0 * s)
-                .items(&[px(38.0 * s), px(compact_h + 2.0 * s), px(normal_h), px(normal_h), px(progress_track_h), px(compact_h), px(normal_h)]).resolve();
+                .items(&[px(38.0 * s), px(dropdown_track_h), px(normal_h), px(normal_h), px(progress_track_h), px(compact_h), px(normal_h)]).resolve();
 
             // Row 0: Search input (with "Search" label matching C++ ui.input("Search", ...))
             if !rows.is_empty() {
@@ -811,30 +812,23 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                 let header_pad = (dr.h * 0.28).clamp(10.0, 22.0);
                 let indicator_size = (dr.h * 0.34).clamp(10.0, 18.0);
                 let text_rect = Rect::new(dr.x + header_pad, dr.y, dr.w - header_pad * 2.0 - indicator_size - 6.0, dr.h);
-                ctx.paint_text_clipped(text_rect, &dropdown_label, header_font, dd_text_color, TextAlign::Left, Some(&text_rect));
+                ctx.paint_text(text_rect, &dropdown_label, header_font, dd_text_color, TextAlign::Left);
                 let chevron_rect = Rect::new(dr.x + dr.w - header_pad - indicator_size, dr.y + (dr.h - indicator_size) * 0.5, indicator_size, indicator_size);
                 let chevron_thickness = (dr.h * 0.065).clamp(1.4, 2.4);
                 ctx.paint_chevron_ex(chevron_rect, dd_muted, 0.0, chevron_thickness);
             }
-            // Row 2: Progress slider
+            // Row 2: Progress slider (C++ ui.slider("Progress", ...) — label drawn internally)
             if rows.len() > 2 {
-                ctx.slider(hash_str("progress_slider"), rows[2], &mut state.progress_ratio, 0.0, 1.0);
-                draw_text_left(ctx, "Progress", Rect::new(rows[2].x, rows[2].y, rows[2].w * 0.5, 14.0), font_meta(s), p.muted, 0.96);
-                draw_text_right(ctx, &format!("{:.2}", state.progress_ratio), Rect::new(rows[2].x + rows[2].w * 0.5, rows[2].y, rows[2].w * 0.5, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("progress_slider"), rows[2], "Progress", &mut state.progress_ratio, 0.0, 1.0);
             }
-            // Row 3: Live Value slider
+            // Row 3: Live Value slider (C++ ui.slider("Live Value", ...) — label drawn internally)
             if rows.len() > 3 {
-                ctx.slider(hash_str("control_slider"), rows[3], &mut state.control_slider, 0.0, 1.0);
-                draw_text_left(ctx, "Live Value", Rect::new(rows[3].x, rows[3].y, rows[3].w * 0.5, 14.0), font_meta(s), p.muted, 0.96);
-                draw_text_right(ctx, &format!("{:.2}", state.control_slider), Rect::new(rows[3].x + rows[3].w * 0.5, rows[3].y, rows[3].w * 0.5, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("control_slider"), rows[3], "Live Value", &mut state.control_slider, 0.0, 1.0);
             }
-            // Row 4: Completion progress bar
+            // Row 4: Completion progress bar (C++ ui.progress("Completion", ...) — label drawn internally)
             if rows.len() > 4 {
                 let pr = state.progress_ratio;
-                let progress_rect = Rect::new(rows[4].x, rows[4].y + rows[4].h - progress_bar_h, rows[4].w, progress_bar_h);
-                ctx.progress_bar(progress_rect, pr);
-                draw_text_left(ctx, "Completion", Rect::new(rows[4].x, rows[4].y, rows[4].w * 0.5, progress_label_h), font_meta(s), p.muted, 0.96);
-                draw_text_right(ctx, &format_percent(pr), Rect::new(rows[4].x + rows[4].w * 0.5, rows[4].y, rows[4].w * 0.5, progress_label_h), font_meta(s), p.muted, 0.96);
+                ctx.progress(hash_str("completion_progress"), rows[4], "Completion", pr, progress_bar_h);
             }
             // Row 5: Gap / Accent readonly
             if rows.len() > 5 {
@@ -857,7 +851,9 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             // "Notes" label matching C++ text_area("Notes", ...) label rendering
             let label_font = (text_area_rect.h * 0.12).clamp(12.0, 18.0);
             let outer_pad = (text_area_rect.h * 0.04).clamp(6.0, 12.0);
-            draw_text_left(ctx, "Notes", Rect::new(text_area_rect.x + outer_pad, text_area_rect.y + outer_pad, text_area_rect.w - outer_pad * 2.0, label_font), label_font, p.muted, 1.0);
+            // C++ add_text(label, label_rect, muted_text, label_font, Left) — no clip
+            let muted_text_col = ctx.theme().muted_text;
+            ctx.paint_text(Rect::new(text_area_rect.x + outer_pad, text_area_rect.y + outer_pad, text_area_rect.w - outer_pad * 2.0, label_font), "Notes", label_font, muted_text_col, TextAlign::Left);
             // Text area box below the label
             let box_y = text_area_rect.y + outer_pad + label_font + 6.0;
             let box_rect = Rect::new(text_area_rect.x + outer_pad, box_y, text_area_rect.w - outer_pad * 2.0, (text_area_rect.h - (label_font + outer_pad + 12.0)).max(0.0));
@@ -1021,12 +1017,10 @@ fn draw_layout_page(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: 
             let control_rows = LinearLayout::column(content).gap(10.0 * s)
                 .items(&[px(40.0 * s), px(40.0 * s), px(36.0 * s)]).resolve();
             if !control_rows.is_empty() {
-                ctx.slider(hash_str("layout_gap"), control_rows[0], &mut state.layout_gap, 8.0, 28.0);
-                draw_text_left(ctx, "Gap", Rect::new(control_rows[0].x, control_rows[0].y, control_rows[0].w, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("layout_gap"), control_rows[0], "Gap", &mut state.layout_gap, 8.0, 28.0);
             }
             if control_rows.len() > 1 {
-                ctx.slider(hash_str("layout_radius"), control_rows[1], &mut state.layout_radius, 8.0, 28.0);
-                draw_text_left(ctx, "Radius", Rect::new(control_rows[1].x, control_rows[1].y, control_rows[1].w, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("layout_radius"), control_rows[1], "Radius", &mut state.layout_radius, 8.0, 28.0);
             }
             if control_rows.len() > 2 {
                 draw_readonly(ctx, control_rows[2], "Core APIs", "view(), row(), column(), grid(), zstack()", s, &p);
@@ -1348,30 +1342,25 @@ fn draw_settings_page(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s
 
             // RGB sliders
             if rows.len() > 6 {
-                if ctx.slider(hash_str("red_slider"), rows[6], &mut state.custom_accent_r, 0.0, 255.0) {
+                if ctx.slider_labeled(hash_str("red_slider"), rows[6], "Red", &mut state.custom_accent_r, 0.0, 255.0) {
                     state.accent_index = custom_accent_slot();
                 }
-                draw_text_left(ctx, "Red", Rect::new(rows[6].x, rows[6].y, rows[6].w, 14.0), font_meta(s), p.muted, 0.96);
             }
             if rows.len() > 7 {
-                if ctx.slider(hash_str("green_slider"), rows[7], &mut state.custom_accent_g, 0.0, 255.0) {
+                if ctx.slider_labeled(hash_str("green_slider"), rows[7], "Green", &mut state.custom_accent_g, 0.0, 255.0) {
                     state.accent_index = custom_accent_slot();
                 }
-                draw_text_left(ctx, "Green", Rect::new(rows[7].x, rows[7].y, rows[7].w, 14.0), font_meta(s), p.muted, 0.96);
             }
             if rows.len() > 8 {
-                if ctx.slider(hash_str("blue_slider"), rows[8], &mut state.custom_accent_b, 0.0, 255.0) {
+                if ctx.slider_labeled(hash_str("blue_slider"), rows[8], "Blue", &mut state.custom_accent_b, 0.0, 255.0) {
                     state.accent_index = custom_accent_slot();
                 }
-                draw_text_left(ctx, "Blue", Rect::new(rows[8].x, rows[8].y, rows[8].w, 14.0), font_meta(s), p.muted, 0.96);
             }
             if rows.len() > 9 {
-                ctx.slider(hash_str("corner_radius"), rows[9], &mut state.layout_radius, 8.0, 28.0);
-                draw_text_left(ctx, "Corner Radius", Rect::new(rows[9].x, rows[9].y, rows[9].w, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("corner_radius"), rows[9], "Corner Radius", &mut state.layout_radius, 8.0, 28.0);
             }
             if rows.len() > 10 {
-                ctx.slider(hash_str("glass_blur"), rows[10], &mut state.settings_blur, 0.0, 28.0);
-                draw_text_left(ctx, "Glass Blur", Rect::new(rows[10].x, rows[10].y, rows[10].w, 14.0), font_meta(s), p.muted, 0.96);
+                ctx.slider_labeled(hash_str("glass_blur"), rows[10], "Glass Blur", &mut state.settings_blur, 0.0, 28.0);
             }
         });
     }
@@ -1651,10 +1640,11 @@ fn draw_card(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPale
     if !title.is_empty() {
         let title_font = font_heading(s);
         let title_height = title_font + 4.0;
-        // C++ SurfaceBuilder uses framework theme text color, not gallery palette
+        // C++ SurfaceBuilder: paint_text(title, title_rect, ..., &shell)
+        // Uses theme text color and clips to entire card shell rect, not title_rect
         let title_rect = Rect::new(inner.x, inner.y, inner.w, title_height);
         let title_color = ctx.theme().text;
-        ctx.paint_text_clipped(title_rect, title, title_font, title_color, TextAlign::Left, Some(&title_rect));
+        ctx.paint_text_clipped(title_rect, title, title_font, title_color, TextAlign::Left, Some(&rect));
         let body_rect = Rect::new(inner.x, inner.y + title_height + 8.0, inner.w, (inner.h - title_height - 8.0).max(0.0));
         body(ctx, body_rect);
     } else {
