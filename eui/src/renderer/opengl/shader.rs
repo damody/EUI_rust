@@ -41,6 +41,60 @@ void main() {
 }
 "#;
 
+// ── Kawase blur shader (for BackdropBlur) ──
+
+pub const BLUR_VERTEX_SOURCE: &str = r#"
+#version 120
+attribute vec2 a_position;
+varying vec2 v_texcoord;
+void main() {
+    gl_Position = vec4(a_position * 2.0 - 1.0, 0.0, 1.0);
+    v_texcoord = a_position;
+}
+"#;
+
+pub const BLUR_FRAGMENT_SOURCE: &str = r#"
+#version 120
+varying vec2 v_texcoord;
+uniform sampler2D u_texture;
+uniform vec2 u_texel_size;
+uniform float u_offset;
+void main() {
+    vec2 uv = v_texcoord;
+    float off = u_offset + 0.5;
+    vec4 c = texture2D(u_texture, uv);
+    c += texture2D(u_texture, uv + vec2( off,  off) * u_texel_size);
+    c += texture2D(u_texture, uv + vec2(-off,  off) * u_texel_size);
+    c += texture2D(u_texture, uv + vec2( off, -off) * u_texel_size);
+    c += texture2D(u_texture, uv + vec2(-off, -off) * u_texel_size);
+    gl_FragColor = c * 0.2;
+}
+"#;
+
+pub unsafe fn create_blur_program(gl: &glow::Context) -> Result<glow::Program, String> {
+    let vs = compile_shader(gl, glow::VERTEX_SHADER, BLUR_VERTEX_SOURCE)?;
+    let fs = compile_shader(gl, glow::FRAGMENT_SHADER, BLUR_FRAGMENT_SOURCE)?;
+
+    let program = gl.create_program().map_err(|e| e.to_string())?;
+    gl.attach_shader(program, vs);
+    gl.attach_shader(program, fs);
+
+    gl.bind_attrib_location(program, 0, "a_position");
+
+    gl.link_program(program);
+    if !gl.get_program_link_status(program) {
+        let log = gl.get_program_info_log(program);
+        gl.delete_program(program);
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+        return Err(log);
+    }
+
+    gl.delete_shader(vs);
+    gl.delete_shader(fs);
+    Ok(program)
+}
+
 pub unsafe fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> Result<glow::Shader, String> {
     let shader = gl.create_shader(shader_type).map_err(|e| e.to_string())?;
     gl.shader_source(shader, source);

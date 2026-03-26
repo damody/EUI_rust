@@ -19,6 +19,20 @@ enum TextureMode {
     Rgba = 2,
 }
 
+struct BlurResources {
+    program: glow::Program,
+    texel_size_loc: glow::UniformLocation,
+    offset_loc: glow::UniformLocation,
+    quad_vbo: glow::Buffer,
+    fbo: [glow::Framebuffer; 2],
+    tex: [glow::Texture; 2],
+    half_w: i32,
+    half_h: i32,
+    copy_tex: glow::Texture,
+    copy_w: i32,
+    copy_h: i32,
+}
+
 pub struct OpenGlRenderer {
     gl: Rc<glow::Context>,
     program: glow::Program,
@@ -29,6 +43,7 @@ pub struct OpenGlRenderer {
     font_atlas: Option<FontAtlas>,
     icon_font_atlas: Option<FontAtlas>,
     image_cache: ImageCache,
+    blur: Option<BlurResources>,
 }
 
 /// Returns true if the codepoint is in the Unicode Private Use Area
@@ -92,6 +107,7 @@ impl OpenGlRenderer {
             font_atlas: None,
             icon_font_atlas: None,
             image_cache: ImageCache::new(),
+            blur: None,
         })
     }
 
@@ -158,6 +174,75 @@ impl OpenGlRenderer {
         } else {
             self.gl.scissor(0, 0, fb_w, fb_h);
         }
+    }
+
+    unsafe fn create_blur_texture(gl: &glow::Context, w: i32, h: i32) -> glow::Texture {
+        let tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        tex
+    }
+
+    unsafe fn create_blur_fbo(gl: &glow::Context, tex: glow::Texture) -> glow::Framebuffer {
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        fbo
+    }
+
+    unsafe fn ensure_blur(&mut self, fb_w: i32, fb_h: i32) {
+        let half_w = (fb_w / 2).max(1);
+        let half_h = (fb_h / 2).max(1);
+
+        if let Some(ref b) = self.blur {
+            if b.copy_w == fb_w && b.copy_h == fb_h {
+                return;
+            }
+            // Size changed — destroy old resources and recreate
+            let gl = &self.gl;
+            gl.delete_texture(b.copy_tex);
+            gl.delete_texture(b.tex[0]);
+            gl.delete_texture(b.tex[1]);
+            gl.delete_framebuffer(b.fbo[0]);
+            gl.delete_framebuffer(b.fbo[1]);
+            gl.delete_buffer(b.quad_vbo);
+            gl.delete_program(b.program);
+            self.blur = None;
+        }
+
+        let gl = &self.gl;
+        let program = shader::create_blur_program(gl).expect("blur shader failed");
+        let texel_size_loc = gl.get_uniform_location(program, "u_texel_size").expect("u_texel_size");
+        let offset_loc = gl.get_uniform_location(program, "u_offset").expect("u_offset");
+
+        let quad_vbo = gl.create_buffer().unwrap();
+        let quad_data: [f32; 12] = [
+            0.0, 0.0,  1.0, 0.0,  1.0, 1.0,
+            0.0, 0.0,  1.0, 1.0,  0.0, 1.0,
+        ];
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(quad_vbo));
+        let bytes: &[u8] = std::slice::from_raw_parts(quad_data.as_ptr() as *const u8, 48);
+        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
+        let copy_tex = Self::create_blur_texture(gl, fb_w, fb_h);
+        let tex0 = Self::create_blur_texture(gl, half_w, half_h);
+        let tex1 = Self::create_blur_texture(gl, half_w, half_h);
+        let fbo0 = Self::create_blur_fbo(gl, tex0);
+        let fbo1 = Self::create_blur_fbo(gl, tex1);
+
+        self.blur = Some(BlurResources {
+            program, texel_size_loc, offset_loc, quad_vbo,
+            fbo: [fbo0, fbo1], tex: [tex0, tex1],
+            half_w, half_h,
+            copy_tex, copy_w: fb_w, copy_h: fb_h,
+        });
     }
 }
 
@@ -399,13 +484,112 @@ impl RendererBackend for OpenGlRenderer {
                         }
                     }
                     CommandType::BackdropBlur => {
-                        let mut verts = Vec::new();
-                        push_quad(
-                            &mut verts,
-                            cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h,
-                            0.0, 0.0, 0.0, 0.15,
-                        );
-                        self.flush_vertices(&verts, TextureMode::None, None);
+                        let blur_radius = cmd.blur_radius.max(0.0);
+                        let corner_radius = cmd.radius;
+                        let rect = cmd.rect;
+
+                        if blur_radius < 1.0 {
+                            // No blur — just draw semi-transparent overlay
+                            let mut verts = Vec::new();
+                            push_quad(&mut verts, rect.x, rect.y, rect.w, rect.h, 0.0, 0.0, 0.0, 0.15);
+                            self.flush_vertices(&verts, TextureMode::None, None);
+                        } else {
+                            // Real Kawase backdrop blur
+                            self.ensure_blur(fb_w, fb_h);
+                            let b = self.blur.as_ref().unwrap();
+                            let bp = b.program;
+                            let btsl = b.texel_size_loc;
+                            let bol = b.offset_loc;
+                            let bqv = b.quad_vbo;
+                            let bfbo = b.fbo;
+                            let btex = b.tex;
+                            let bhw = b.half_w;
+                            let bhh = b.half_h;
+                            let bct = b.copy_tex;
+
+                            let gl = &self.gl;
+
+                            // 1. Copy current framebuffer → copy_tex
+                            gl.bind_texture(glow::TEXTURE_2D, Some(bct));
+                            gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, fb_w, fb_h);
+
+                            // 2. Disable scissor for blur passes
+                            gl.disable(glow::SCISSOR_TEST);
+
+                            let passes = ((blur_radius / 3.0) as i32).clamp(2, 6);
+
+                            // 3. Set up blur shader + fullscreen quad VBO
+                            gl.use_program(Some(bp));
+                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(bqv));
+                            gl.enable_vertex_attrib_array(0);
+                            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
+                            gl.disable_vertex_attrib_array(1);
+                            gl.disable_vertex_attrib_array(2);
+                            gl.active_texture(glow::TEXTURE0);
+
+                            // 4. Pass 0: downsample copy_tex → fbo[0] at half res
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(bfbo[0]));
+                            gl.viewport(0, 0, bhw, bhh);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(bct));
+                            gl.uniform_2_f32(Some(&btsl), 1.0 / fb_w as f32, 1.0 / fb_h as f32);
+                            gl.uniform_1_f32(Some(&bol), 0.0);
+                            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+
+                            // 5. Kawase blur passes (ping-pong at half res)
+                            for i in 1..passes {
+                                let src = ((i - 1) % 2) as usize;
+                                let dst = (i % 2) as usize;
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(bfbo[dst]));
+                                gl.bind_texture(glow::TEXTURE_2D, Some(btex[src]));
+                                gl.uniform_2_f32(Some(&btsl), 1.0 / bhw as f32, 1.0 / bhh as f32);
+                                gl.uniform_1_f32(Some(&bol), i as f32);
+                                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                            }
+
+                            let final_tex = btex[((passes - 1) % 2) as usize];
+
+                            // 6. Restore main framebuffer + viewport + scissor + main shader
+                            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                            gl.viewport(0, 0, fb_w, fb_h);
+                            gl.enable(glow::SCISSOR_TEST);
+                            self.set_scissor(cmd, fb_w, fb_h);
+                            gl.use_program(Some(self.program));
+                            gl.uniform_2_f32(Some(&self.viewport_uniform), fb_w as f32, fb_h as f32);
+
+                            // 7. Composite: draw blurred texture into blur rect
+                            let fb_wf = fb_w as f32;
+                            let fb_hf = fb_h as f32;
+                            let u0 = rect.x / fb_wf;
+                            let u1 = (rect.x + rect.w) / fb_wf;
+                            let v_top = 1.0 - rect.y / fb_hf;
+                            let v_bot = 1.0 - (rect.y + rect.h) / fb_hf;
+
+                            if corner_radius > 0.0 {
+                                // Stencil for rounded corners
+                                gl.enable(glow::STENCIL_TEST);
+                                gl.clear(glow::STENCIL_BUFFER_BIT);
+                                gl.stencil_func(glow::ALWAYS, 1, 0xFF);
+                                gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+                                gl.color_mask(false, false, false, false);
+
+                                let mut sv = Vec::new();
+                                push_rounded_quad(&mut sv, rect.x, rect.y, rect.w, rect.h, 1.0, 1.0, 1.0, 1.0, corner_radius);
+                                self.flush_vertices(&sv, TextureMode::None, None);
+
+                                gl.color_mask(true, true, true, true);
+                                gl.stencil_func(glow::EQUAL, 1, 0xFF);
+                                gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+                            }
+
+                            let mut verts = Vec::new();
+                            push_textured_quad(&mut verts, rect.x, rect.y, rect.w, rect.h,
+                                1.0, 1.0, 1.0, 1.0, u0, v_top, u1, v_bot);
+                            self.flush_vertices(&verts, TextureMode::Rgba, Some(final_tex));
+
+                            if corner_radius > 0.0 {
+                                gl.disable(glow::STENCIL_TEST);
+                            }
+                        }
                     }
                     CommandType::Chevron => {
                         let mut verts = Vec::new();
@@ -479,6 +663,15 @@ impl RendererBackend for OpenGlRenderer {
                 atlas.destroy(&self.gl);
             }
             self.image_cache.destroy(&self.gl);
+            if let Some(ref b) = self.blur {
+                self.gl.delete_texture(b.copy_tex);
+                self.gl.delete_texture(b.tex[0]);
+                self.gl.delete_texture(b.tex[1]);
+                self.gl.delete_framebuffer(b.fbo[0]);
+                self.gl.delete_framebuffer(b.fbo[1]);
+                self.gl.delete_buffer(b.quad_vbo);
+                self.gl.delete_program(b.program);
+            }
             self.gl.delete_buffer(self.vbo);
             self.gl.delete_program(self.program);
         }
