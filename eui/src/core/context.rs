@@ -1582,13 +1582,10 @@ impl Context {
             self.paint_filled_rect(track, mix(secondary, panel, 0.45), 3.0);
             self.paint_filled_rect(thumb, mix(primary, panel, 0.40), 3.0);
 
-            // Draw visible text lines with clip (C++ add_text skips empty lines)
+            // Draw all text lines with clip (C++ emits all lines, clip_rect handles visibility)
             let mut y = input_rect.y + text_pad;
             for (start, len) in &lines {
-                if y > input_rect.y + input_rect.h - text_pad {
-                    break;
-                }
-                if *len > 0 && y + line_h >= input_rect.y + text_pad {
+                if *len > 0 {
                     let line_text = &text[*start..*start + *len];
                     self.paint_text_clipped(
                         Rect::new(content_clip.x, y, content_w, line_h),
@@ -1745,16 +1742,11 @@ impl Context {
     }
 
     /// Expanding dropdown with selectable items, matching C++ `internal_begin_dropdown`.
-    /// Returns true when the selection changes.
-    /// `label`: header text (e.g. "Density: Compact")
-    /// `open`: mutable open/close state
-    /// `items`: list of selectable item labels
-    /// `selected`: current selection index
-    /// `body_height`: height of expanded body
-    /// `padding`: internal padding
+    /// Items are rendered as ghost buttons (fill + outline + center text).
     pub fn dropdown_select(
         &mut self, id: u64, rect: Rect, label: &str, open: &mut bool,
-        items: &[&str], selected: &mut usize, body_height: f32, padding: f32,
+        items: &[&str], selected: &mut usize,
+        body_height: f32, padding: f32, item_h: f32, item_gap: f32,
     ) -> bool {
         let body_height = body_height.max(36.0);
         let padding = padding.clamp(4.0, 24.0);
@@ -1828,7 +1820,7 @@ impl Context {
                 rect.w, body_height,
             );
 
-            // Body shell
+            // Body shell: soft glow + fill + outline
             let body_fill = mix(panel, self.theme.secondary_hover, 0.35);
             let body_fill_a = Color::new(body_fill.r, body_fill.g, body_fill.b, body_fill.a * body_alpha);
             self.paint_soft_glow(body_rect, primary, radius, (active_v * 0.10 + reveal_alpha * 0.14) * body_alpha, 6.0);
@@ -1838,32 +1830,36 @@ impl Context {
             let body_outline_a = Color::new(body_outline.r, body_outline.g, body_outline.b, body_outline.a * outline_a);
             self.paint_outline_rect(body_rect, body_outline_a, radius, 1.0 + active_v * 0.12);
 
-            // Items
-            let item_h = ((body_height - padding * 2.0) / items.len().max(1) as f32).max(20.0);
-            let item_font = (item_h * 0.48).clamp(12.0, 22.0);
-            let item_x = body_rect.x + padding;
-            let item_w = body_rect.w - padding * 2.0;
-            let mut item_y = body_rect.y + padding + content_offset_y;
+            // Items as ghost buttons (fill + outline + center text) matching C++
+            let btn_font = (item_h * 0.38).clamp(13.0, 24.0);
+            let btn_x = body_rect.x + padding;
+            let btn_w = body_rect.w - padding * 2.0;
+            let mut btn_y = body_rect.y + padding + content_offset_y;
 
             for (i, item_label) in items.iter().enumerate() {
-                let item_rect = Rect::new(item_x, item_y, item_w, item_h);
-                let is_selected = i == *selected;
-                let item_hovered = self.is_hovered(&item_rect) && *open;
+                let btn_rect = Rect::new(btn_x, btn_y, btn_w, item_h);
+                let item_hovered = self.is_hovered(&btn_rect) && *open;
+                let item_held = item_hovered && self.is_mouse_down();
                 let item_id = context_hash_mix(id, 0x1a2b3c4d5e6f8000 + i as u64);
-                let im = self.motion(item_id, item_hovered, item_hovered && self.is_mouse_down());
 
-                // Item hover highlight
-                if im.hover > 0.01 {
-                    let hover_fill = mix(self.theme.panel, self.theme.secondary_hover, im.hover * 0.5);
-                    let hover_fill_a = Color::new(hover_fill.r, hover_fill.g, hover_fill.b, hover_fill.a * content_alpha);
-                    self.paint_filled_rect(item_rect, hover_fill_a, radius * 0.5);
-                }
+                // Ghost button: 4-channel motion
+                let im = self.motion_ex(item_id, item_hovered, item_held, false, false);
+                let ih = Self::snap_visual_motion(im.hover, 1.0 / 48.0);
+                let ia = Self::snap_visual_motion(im.active, 1.0 / 40.0);
 
-                // Item text
-                let item_text_rect = Rect::new(item_rect.x + header_pad * 0.5, item_rect.y, item_rect.w - header_pad, item_rect.h);
-                let item_color = if is_selected { self.theme.primary } else { self.theme.text };
-                let item_color_a = Color::new(item_color.r, item_color.g, item_color.b, item_color.a * content_alpha);
-                self.paint_text(item_text_rect, item_label, item_font, item_color_a, TextAlign::Left);
+                // Ghost button chrome: fill + outline (matching C++ button.ghost())
+                let btn_fill = mix(panel, secondary_hover, ih * 0.32 + ia * 0.08);
+                let btn_fill_a = Color::new(btn_fill.r, btn_fill.g, btn_fill.b, btn_fill.a * content_alpha);
+                self.paint_filled_rect(btn_rect, btn_fill_a, radius);
+                let btn_outline = mix(self.theme.outline, self.theme.focus_ring,
+                                       ih * 0.20 + ia * 0.18);
+                let btn_outline_a = Color::new(btn_outline.r, btn_outline.g, btn_outline.b, btn_outline.a * content_alpha);
+                self.paint_outline_rect(btn_rect, btn_outline_a, radius, 1.0);
+
+                // Center-aligned text (matching C++ button text)
+                let btn_text_color = self.theme.text;
+                let btn_text_a = Color::new(btn_text_color.r, btn_text_color.g, btn_text_color.b, btn_text_color.a * content_alpha);
+                self.paint_text(btn_rect, item_label, btn_font, btn_text_a, TextAlign::Center);
 
                 // Click to select
                 if item_hovered && self.input.mouse_pressed {
@@ -1872,7 +1868,7 @@ impl Context {
                     changed = true;
                 }
 
-                item_y += item_h;
+                btn_y += item_h + item_gap;
             }
         }
 
