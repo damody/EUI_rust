@@ -4,12 +4,39 @@ use glow::HasContext;
 
 use crate::core::draw_command::*;
 use crate::graphics::primitives::ImageFit;
+use crate::graphics::transforms::Transform3D;
 use crate::renderer::contracts::*;
 use crate::renderer::opengl::font_renderer::FontAtlas;
 use crate::renderer::opengl::image_cache::ImageCache;
 use crate::renderer::opengl::shader;
 use crate::renderer::opengl::vertex::*;
 use crate::runtime::contracts::WindowMetrics;
+
+/// Rotate all vertices around an origin point by angle_deg degrees.
+fn rotate_vertices(verts: &mut [Vertex], angle_deg: f32, origin_x: f32, origin_y: f32) {
+    let rad = angle_deg * std::f32::consts::PI / 180.0;
+    let cos_a = rad.cos();
+    let sin_a = rad.sin();
+    for v in verts.iter_mut() {
+        let dx = v.x - origin_x;
+        let dy = v.y - origin_y;
+        v.x = origin_x + dx * cos_a - dy * sin_a;
+        v.y = origin_y + dx * sin_a + dy * cos_a;
+    }
+}
+
+/// Get rotation info from a command's transform. Returns (angle_deg, origin_x, origin_y) or None.
+fn get_rotation(cmd: &DrawCommand, transforms: &[Transform3D]) -> Option<(f32, f32, f32)> {
+    if cmd.transform_payload_index == K_INVALID_PAYLOAD_INDEX {
+        return None;
+    }
+    let t = transforms.get(cmd.transform_payload_index as usize)?;
+    if t.rotation_z_deg.abs() < 0.001 {
+        return None;
+    }
+    // Origin is relative to rect position
+    Some((t.rotation_z_deg, cmd.rect.x + t.origin_x, cmd.rect.y + t.origin_y))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -286,6 +313,9 @@ impl RendererBackend for OpenGlRenderer {
                             cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
                             cmd.radius,
                         );
+                        if let Some((angle, ox, oy)) = get_rotation(cmd, draw_data.transform_payloads) {
+                            rotate_vertices(&mut verts, angle, ox, oy);
+                        }
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
                     CommandType::RectOutline => {
@@ -296,6 +326,9 @@ impl RendererBackend for OpenGlRenderer {
                             cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
                             cmd.radius, cmd.thickness,
                         );
+                        if let Some((angle, ox, oy)) = get_rotation(cmd, draw_data.transform_payloads) {
+                            rotate_vertices(&mut verts, angle, ox, oy);
+                        }
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
                     CommandType::Text => {
