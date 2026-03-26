@@ -1,6 +1,7 @@
 use eui::*;
 use eui::quick::ui::*;
 use eui::quick::layouts::*;
+use eui::core::context_utils::{context_scale_rect_from_center, context_translate_rect};
 
 // ── State ──
 
@@ -729,6 +730,11 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                 if rows.len() > i + 1 {
                     let is_selected = state.controls_mode == i;
                     let active_v: f32 = if is_selected { 1.0 } else { 0.0 };
+                    let press_v: f32 = 0.0; // static first frame
+                    // C++: visual_scale = 1.0 + active_v * 0.004 - press_v * 0.014
+                    let visual_scale = 1.0 + active_v * 0.004 - press_v * 0.014;
+                    let mut visual_rect = context_scale_rect_from_center(&rows[i + 1], visual_scale, visual_scale);
+                    visual_rect = context_translate_rect(&visual_rect, 0.0, press_v * 0.3);
                     // C++ fill: mix(secondary, mix(primary, panel, 0.72), active_v)
                     let fill = mix_color(theme_secondary, mix_color(theme_primary, theme_panel, 0.72), active_v);
                     // C++ outline: mix(mix(outline, panel, 0.6), primary, active_v * 0.78)
@@ -738,11 +744,11 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     // C++ text: mix(muted_text, text, 0.38 + active_v * 0.62)
                     let text_color = mix_color(theme_muted_text, theme_text, 0.38 + active_v * 0.62);
                     if is_selected {
-                        ctx.paint_soft_glow(rows[i + 1], theme_primary, tab_radius, active_v * 0.34, 5.0);
+                        ctx.paint_soft_glow(visual_rect, theme_primary, tab_radius, active_v * 0.34, 5.0);
                     }
-                    ctx.paint_filled_rect(rows[i + 1], fill, tab_radius);
-                    ctx.paint_outline_rect(rows[i + 1], outline, tab_radius, thickness);
-                    ctx.paint_text(rows[i + 1], control_modes[i], text_size, text_color, TextAlign::Center);
+                    ctx.paint_filled_rect(visual_rect, fill, tab_radius);
+                    ctx.paint_outline_rect(visual_rect, outline, tab_radius, thickness);
+                    ctx.paint_text(visual_rect, control_modes[i], text_size, text_color, TextAlign::Center);
                     if clicked(ctx, &rows[i + 1]) { state.controls_mode = i; }
                 }
             }
@@ -751,17 +757,21 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                 if rows.len() > i + 5 {
                     let is_on = state.controls_multi_select[i];
                     let active_v: f32 = if is_on { 1.0 } else { 0.0 };
+                    let press_v: f32 = 0.0;
+                    let visual_scale = 1.0 + active_v * 0.004 - press_v * 0.014;
+                    let mut visual_rect = context_scale_rect_from_center(&rows[i + 5], visual_scale, visual_scale);
+                    visual_rect = context_translate_rect(&visual_rect, 0.0, press_v * 0.3);
                     let fill = mix_color(theme_secondary, mix_color(theme_primary, theme_panel, 0.72), active_v);
                     let outline = mix_color(mix_color(theme_outline, theme_panel, 0.6), theme_primary, active_v * 0.78);
                     let thickness = 1.0 + active_v * 0.36;
                     let text_size = (rows[i + 5].h * 0.42).clamp(13.0, 26.0);
                     let text_color = mix_color(theme_muted_text, theme_text, 0.38 + active_v * 0.62);
                     if is_on {
-                        ctx.paint_soft_glow(rows[i + 5], theme_primary, tab_radius, active_v * 0.34, 5.0);
+                        ctx.paint_soft_glow(visual_rect, theme_primary, tab_radius, active_v * 0.34, 5.0);
                     }
-                    ctx.paint_filled_rect(rows[i + 5], fill, tab_radius);
-                    ctx.paint_outline_rect(rows[i + 5], outline, tab_radius, thickness);
-                    ctx.paint_text(rows[i + 5], control_toggles[i], text_size, text_color, TextAlign::Center);
+                    ctx.paint_filled_rect(visual_rect, fill, tab_radius);
+                    ctx.paint_outline_rect(visual_rect, outline, tab_radius, thickness);
+                    ctx.paint_text(visual_rect, control_toggles[i], text_size, text_color, TextAlign::Center);
                     if clicked(ctx, &rows[i + 5]) { state.controls_multi_select[i] = !state.controls_multi_select[i]; }
                 }
             }
@@ -847,7 +857,11 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
     if cols.len() > 3 {
         draw_card(ctx, cols[3], "Editor", s, &p, |ctx, content| {
             draw_readonly(ctx, Rect::new(content.x, content.y, content.w, 32.0 * s), "Purpose", "Multiline input, wrapping and scroll behavior", s, &p);
-            let text_area_rect = Rect::new(content.x, content.y + 40.0 * s, content.w, (content.h - 40.0 * s).max(0.0));
+            let compact_h = 32.0 * s;
+            let item_spacing = 8.0; // C++ item_spacing_ default
+            let text_area_y = content.y + compact_h + item_spacing;
+            let text_area_h = (160.0_f32 * s).max(content.h - 40.0 * s); // C++: max(160*scale, card.content().h - 40*scale)
+            let text_area_rect = Rect::new(content.x, text_area_y, content.w, text_area_h);
             // "Notes" label matching C++ text_area("Notes", ...) label rendering
             let label_font = (text_area_rect.h * 0.12).clamp(12.0, 18.0);
             let outer_pad = (text_area_rect.h * 0.04).clamp(6.0, 12.0);
