@@ -19,11 +19,14 @@ impl TextMeasurer {
         Self { font }
     }
 
+    pub fn measure_char_advance(&self, ch: char, font_size: f32) -> f32 {
+        self.font.metrics(ch, font_size).advance_width
+    }
+
     pub fn measure_width(&self, text: &str, font_size: f32) -> f32 {
         let mut width = 0.0;
         for ch in text.chars() {
-            let metrics = self.font.metrics(ch, font_size);
-            width += metrics.advance_width;
+            width += self.font.metrics(ch, font_size).advance_width;
         }
         width
     }
