@@ -90,6 +90,7 @@ impl ApplicationHandler for AppHandler {
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
+            .with_stencil_size(8)
             .with_multisampling(4);
 
         let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attrs));

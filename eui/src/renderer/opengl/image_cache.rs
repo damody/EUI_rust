@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use glow::HasContext;
+use image::ImageReader;
 
 pub struct CachedImage {
     pub texture: glow::Texture,
@@ -21,7 +22,19 @@ impl ImageCache {
             return self.cache.get(path);
         }
 
-        let img = image::open(path).ok()?.to_rgba8();
+        let reader = match ImageReader::open(path) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("[IMAGE] open failed {:?}: {}", path, e); return None; }
+        };
+        let reader = match reader.with_guessed_format() {
+            Ok(r) => r,
+            Err(e) => { eprintln!("[IMAGE] format guess failed {:?}: {}", path, e); return None; }
+        };
+        let decoded = match reader.decode() {
+            Ok(d) => d,
+            Err(e) => { eprintln!("[IMAGE] decode failed {:?}: {}", path, e); return None; }
+        };
+        let img = decoded.to_rgba8();
         let (w, h) = img.dimensions();
         let data = img.into_raw();
 
@@ -38,6 +51,7 @@ impl ImageCache {
         );
         gl.bind_texture(glow::TEXTURE_2D, None);
 
+        eprintln!("[IMAGE] loaded {:?} ({}x{}) tex={:?}", path, w, h, texture);
         self.cache.insert(path.to_string(), CachedImage { texture, width: w, height: h });
         self.cache.get(path)
     }

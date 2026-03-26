@@ -3,6 +3,7 @@ use std::rc::Rc;
 use glow::HasContext;
 
 use crate::core::draw_command::*;
+use crate::graphics::primitives::ImageFit;
 use crate::renderer::contracts::*;
 use crate::renderer::opengl::font_renderer::FontAtlas;
 use crate::renderer::opengl::image_cache::ImageCache;
@@ -34,6 +35,39 @@ pub struct OpenGlRenderer {
 /// (used for icon fonts like Font Awesome).
 fn is_private_use_codepoint(cp: u32) -> bool {
     cp >= 0xE000 && cp <= 0xF8FF
+}
+
+/// Calculate draw rect and UV coords for a given image fit mode.
+/// Returns (draw_x, draw_y, draw_w, draw_h, u0, v0, u1, v1).
+fn resolve_image_fit(
+    fit: ImageFit, fx: f32, fy: f32, fw: f32, fh: f32, img_w: f32, img_h: f32,
+) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+    match fit {
+        ImageFit::Fill | ImageFit::Stretch => {
+            (fx, fy, fw, fh, 0.0, 0.0, 1.0, 1.0)
+        }
+        ImageFit::Center => {
+            let dx = fx + (fw - img_w) * 0.5;
+            let dy = fy + (fh - img_h) * 0.5;
+            (dx, dy, img_w, img_h, 0.0, 0.0, 1.0, 1.0)
+        }
+        ImageFit::Contain => {
+            let scale = (fw / img_w).min(fh / img_h);
+            let dw = img_w * scale;
+            let dh = img_h * scale;
+            let dx = fx + (fw - dw) * 0.5;
+            let dy = fy + (fh - dh) * 0.5;
+            (dx, dy, dw, dh, 0.0, 0.0, 1.0, 1.0)
+        }
+        ImageFit::Cover => {
+            let scale = (fw / img_w).max(fh / img_h);
+            let dw = img_w * scale;
+            let dh = img_h * scale;
+            let dx = fx + (fw - dw) * 0.5;
+            let dy = fy + (fh - dh) * 0.5;
+            (dx, dy, dw, dh, 0.0, 0.0, 1.0, 1.0)
+        }
+    }
 }
 
 impl OpenGlRenderer {
@@ -134,7 +168,7 @@ impl RendererBackend for OpenGlRenderer {
             gl.viewport(0, 0, metrics.framebuffer_w, metrics.framebuffer_h);
             if clear_state.clear_color {
                 gl.clear_color(clear_state.r, clear_state.g, clear_state.b, clear_state.a);
-                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.clear(glow::COLOR_BUFFER_BIT | glow::STENCIL_BUFFER_BIT);
             }
             gl.enable(glow::BLEND);
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -293,17 +327,74 @@ impl RendererBackend for OpenGlRenderer {
                         if end <= draw_data.text_arena.len() {
                             let path = std::str::from_utf8(&draw_data.text_arena[start..end]).unwrap_or("");
                             let gl_ref = Rc::clone(&self.gl);
-                            // Load texture, get its id
-                            let tex_id = self.image_cache.get_or_load(&gl_ref, path).map(|c| c.texture);
-                            if let Some(tex) = tex_id {
-                                let mut verts = Vec::new();
-                                push_textured_quad(
-                                    &mut verts,
-                                    cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h,
-                                    1.0, 1.0, 1.0, 1.0,
-                                    0.0, 0.0, 1.0, 1.0,
-                                );
-                                self.flush_vertices(&verts, TextureMode::Rgba, Some(tex));
+                            if let Some(cached) = self.image_cache.get_or_load(&gl_ref, path) {
+                                let tex = cached.texture;
+                                let img_w = cached.width as f32;
+                                let img_h = cached.height as f32;
+                                let frame = &cmd.rect;
+                                let fit = cmd.image_fit;
+
+                                // Calculate draw rect and UV based on fit mode
+                                let (draw_x, draw_y, draw_w, draw_h, u0, v0, u1, v1) =
+                                    resolve_image_fit(fit, frame.x, frame.y, frame.w, frame.h, img_w, img_h);
+
+                                let gl = &self.gl;
+                                let radius = cmd.radius;
+
+                                // Set scissor to frame rect (clips Cover/Center overflow)
+                                let sx = frame.x as i32;
+                                let sy = fb_h - (frame.y + frame.h) as i32;
+                                let sw = frame.w as i32;
+                                let sh = frame.h as i32;
+                                gl.scissor(sx.max(0), sy.max(0), sw.max(1), sh.max(1));
+
+                                if radius > 0.0 {
+                                    // Stencil-based rounded corner clipping
+                                    gl.enable(glow::STENCIL_TEST);
+                                    gl.clear(glow::STENCIL_BUFFER_BIT);
+                                    gl.stencil_func(glow::ALWAYS, 1, 0xFF);
+                                    gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+                                    gl.color_mask(false, false, false, false);
+
+                                    // Draw rounded rect shape into stencil
+                                    let mut stencil_verts = Vec::new();
+                                    push_rounded_quad(
+                                        &mut stencil_verts,
+                                        frame.x, frame.y, frame.w, frame.h,
+                                        1.0, 1.0, 1.0, 1.0,
+                                        radius,
+                                    );
+                                    self.flush_vertices(&stencil_verts, TextureMode::None, None);
+
+                                    // Now draw image only where stencil == 1
+                                    gl.color_mask(true, true, true, true);
+                                    gl.stencil_func(glow::EQUAL, 1, 0xFF);
+                                    gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+
+                                    let mut verts = Vec::new();
+                                    push_textured_quad(
+                                        &mut verts,
+                                        draw_x, draw_y, draw_w, draw_h,
+                                        1.0, 1.0, 1.0, 1.0,
+                                        u0, v0, u1, v1,
+                                    );
+                                    self.flush_vertices(&verts, TextureMode::Rgba, Some(tex));
+
+                                    gl.disable(glow::STENCIL_TEST);
+                                } else {
+                                    // No radius — just draw with scissor clipping
+                                    let mut verts = Vec::new();
+                                    push_textured_quad(
+                                        &mut verts,
+                                        draw_x, draw_y, draw_w, draw_h,
+                                        1.0, 1.0, 1.0, 1.0,
+                                        u0, v0, u1, v1,
+                                    );
+                                    self.flush_vertices(&verts, TextureMode::Rgba, Some(tex));
+                                }
+
+                                // Restore scissor
+                                self.set_scissor(cmd, fb_w, fb_h);
                             }
                         }
                     }
