@@ -36,6 +36,8 @@ struct AppState {
     frame_index: u64,
     _redraw_needed: bool,
     pending_dump_json: bool,
+    clipboard: Option<arboard::Clipboard>,
+    key_ctrl: bool,
 }
 
 pub fn run_app<F>(build_ui: F, options: AppOptions)
@@ -192,6 +194,8 @@ impl ApplicationHandler for AppHandler {
             frame_index: 0,
             _redraw_needed: true,
             pending_dump_json: false,
+            clipboard: arboard::Clipboard::new().ok(),
+            key_ctrl: false,
         });
     }
 
@@ -258,6 +262,14 @@ impl ApplicationHandler for AppHandler {
                     );
                 }
 
+                // Write clipboard_out to system clipboard if non-empty
+                if !state.input.clipboard_out.is_empty() {
+                    if let Some(cb) = state.clipboard.as_mut() {
+                        let _ = cb.set_text(state.input.clipboard_out.clone());
+                    }
+                    state.input.clipboard_out.clear();
+                }
+
                 state.gl_surface.swap_buffers(&state.gl_context).expect("swap buffers");
                 state.frame_index += 1;
 
@@ -282,6 +294,7 @@ impl ApplicationHandler for AppHandler {
                 state.input.key_copy = false;
                 state.input.key_cut = false;
                 state.input.key_paste = false;
+                state.input.clipboard_text.clear();
 
                 // Request continuous redraws
                 state.window.request_redraw();
@@ -336,15 +349,45 @@ impl ApplicationHandler for AppHandler {
                         Key::Named(NamedKey::Home) => state.input.key_home = true,
                         Key::Named(NamedKey::End) => state.input.key_end = true,
                         Key::Named(NamedKey::Shift) => state.input.key_shift = true,
+                        Key::Named(NamedKey::Control) => state.key_ctrl = true,
+                        Key::Character(ref c) if state.key_ctrl => {
+                            match c.as_str() {
+                                "a" | "A" => state.input.key_select_all = true,
+                                "c" | "C" => state.input.key_copy = true,
+                                "x" | "X" => state.input.key_cut = true,
+                                "v" | "V" => {
+                                    state.input.key_paste = true;
+                                    state.input.clipboard_text = state.clipboard
+                                        .as_mut()
+                                        .and_then(|cb| cb.get_text().ok())
+                                        .unwrap_or_default();
+                                }
+                                _ => {}
+                            }
+                        }
                         Key::Character(ref c) if c.as_str() == "p" || c.as_str() == "P" => {
-                            state.pending_dump_json = true;
+                            if state.ctx.focus_id == 0 {
+                                state.pending_dump_json = true;
+                            }
                         }
                         _ => {}
                     }
+                    // Forward printable text to text_input (winit 0.30: event.text)
+                    // Skip when Ctrl is held to avoid inserting control chars
+                    if !state.key_ctrl {
+                        if let Some(ref text) = event.text {
+                            let s = text.as_str();
+                            if !s.is_empty() && s.chars().all(|c| !c.is_control()) {
+                                state.input.text_input.push_str(s);
+                            }
+                        }
+                    }
                 }
                 if !pressed {
-                    if let Key::Named(NamedKey::Shift) = event.logical_key {
-                        state.input.key_shift = false;
+                    match event.logical_key {
+                        Key::Named(NamedKey::Shift) => state.input.key_shift = false,
+                        Key::Named(NamedKey::Control) => state.key_ctrl = false,
+                        _ => {}
                     }
                 }
                 state.window.request_redraw();

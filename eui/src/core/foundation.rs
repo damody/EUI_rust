@@ -161,5 +161,6 @@ pub struct InputState {
     pub key_shift: bool,
     pub text_input: String,
     pub clipboard_text: String,
+    pub clipboard_out: String,
     pub time_seconds: f64,
 }
