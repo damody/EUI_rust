@@ -799,8 +799,14 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             let dropdown_label = format!("Density: {}", density_text);
             // C++ dropdown_track_h = max(34, dropdown_padding*3) + (open ? body : 0)
             let dropdown_padding = 10.0 * s;
+            let dropdown_item_gap = 6.0 * s;
+            let dropdown_item_h = compact_h;
             let dropdown_header_h = 34.0_f32.max(dropdown_padding * 3.0);
-            let dropdown_body_h = 104.0 * s;
+            // C++: body = padding*2 + item_h*n + gap*(n-1)
+            let n_items = control_modes_labels.len() as f32;
+            let dropdown_body_h = dropdown_padding * 2.0
+                + dropdown_item_h * n_items
+                + dropdown_item_gap * (n_items - 1.0).max(0.0);
             let dropdown_track_h = if state.controls_dropdown_open {
                 dropdown_header_h + dropdown_body_h
             } else {
@@ -819,7 +825,7 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
                     hash_str("density_dropdown"), rows[1], &dropdown_label,
                     &mut state.controls_dropdown_open,
                     &control_modes_labels, &mut state.controls_mode,
-                    dropdown_body_h, dropdown_padding,
+                    dropdown_body_h, dropdown_padding, dropdown_item_h, dropdown_item_gap,
                 );
             }
             // Row 2: Progress slider (C++ ui.slider("Progress", ...) — label drawn internally)
