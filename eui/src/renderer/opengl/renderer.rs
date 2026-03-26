@@ -320,23 +320,51 @@ impl RendererBackend for OpenGlRenderer {
                         let mut verts = Vec::new();
                         let cx = cmd.rect.x + cmd.rect.w * 0.5;
                         let cy = cmd.rect.y + cmd.rect.h * 0.5;
-                        let sz = cmd.rect.w.min(cmd.rect.h) * 0.3;
+                        let sz = cmd.rect.w.min(cmd.rect.h) * 0.35;
                         let c = &cmd.color;
-                        let t = cmd.thickness.max(0.5);
-                        // Draw a V-shaped chevron pointing down (rotation=0),
-                        // rotated by cmd.rotation (in radians)
+                        let half_t = cmd.thickness.max(0.8) * 0.5;
                         let cos_r = cmd.rotation.cos();
                         let sin_r = cmd.rotation.sin();
                         let rotate = |dx: f32, dy: f32| -> (f32, f32) {
                             (cx + dx * cos_r - dy * sin_r, cy + dx * sin_r + dy * cos_r)
                         };
-                        // Left arm: from top-left to center-bottom
-                        let (x0, y0) = rotate(-sz * 0.5, -sz * 0.35);
-                        let (x1, y1) = rotate(0.0, sz * 0.35);
-                        push_quad(&mut verts, x0.min(x1), y0.min(y1), (x1 - x0).abs().max(t * 1.4), (y1 - y0).abs().max(t * 1.4), c.r, c.g, c.b, c.a);
-                        // Right arm: from center-bottom to top-right
-                        let (x2, y2) = rotate(sz * 0.5, -sz * 0.35);
-                        push_quad(&mut verts, x1.min(x2), y1.min(y2), (x2 - x1).abs().max(t * 1.4), (y2 - y1).abs().max(t * 1.4), c.r, c.g, c.b, c.a);
+                        // ">" shape (rotation=0): tip at right, arms go to upper-left and lower-left
+                        // Upper arm: (left, top) -> (right, center)
+                        let ax0 = -sz * 0.4;
+                        let ay0 = -sz * 0.5;
+                        let ax1 = sz * 0.4;
+                        let ay1 = 0.0_f32;
+                        // Lower arm: (right, center) -> (left, bottom)
+                        let bx0 = sz * 0.4;
+                        let by0 = 0.0_f32;
+                        let bx1 = -sz * 0.4;
+                        let by1 = sz * 0.5;
+
+                        // Draw each arm as a rotated thin quad (line segment with thickness)
+                        let draw_line = |verts: &mut Vec<Vertex>, lx0: f32, ly0: f32, lx1: f32, ly1: f32| {
+                            let dx = lx1 - lx0;
+                            let dy = ly1 - ly0;
+                            let len = (dx * dx + dy * dy).sqrt().max(0.001);
+                            // Perpendicular direction for thickness
+                            let px = -dy / len * half_t;
+                            let py = dx / len * half_t;
+                            let (p0x, p0y) = rotate(lx0 - px, ly0 - py);
+                            let (p1x, p1y) = rotate(lx0 + px, ly0 + py);
+                            let (p2x, p2y) = rotate(lx1 + px, ly1 + py);
+                            let (p3x, p3y) = rotate(lx1 - px, ly1 - py);
+                            // Two triangles for the quad
+                            let v = |x: f32, y: f32| -> Vertex {
+                                Vertex { x, y, u: 0.0, v: 0.0, r: c.r, g: c.g, b: c.b, a: c.a }
+                            };
+                            verts.push(v(p0x, p0y));
+                            verts.push(v(p1x, p1y));
+                            verts.push(v(p2x, p2y));
+                            verts.push(v(p0x, p0y));
+                            verts.push(v(p2x, p2y));
+                            verts.push(v(p3x, p3y));
+                        };
+                        draw_line(&mut verts, ax0, ay0, ax1, ay1);
+                        draw_line(&mut verts, bx0, by0, bx1, by1);
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
                 }
