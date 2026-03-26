@@ -418,6 +418,108 @@ impl Context {
         }
     }
 
+    /// Compute line breaks for wrapped text matching C++ character wrapping algorithm.
+    /// Returns Vec of (start_byte, length_bytes) for each line.
+    fn compute_wrapped_lines(&self, text: &str, font_size: f32, content_w: f32) -> Vec<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let mut lines = Vec::with_capacity(64);
+        let mut line_start: usize = 0;
+        let mut index: usize = 0;
+        let mut line_width: f32 = 0.0;
+
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if ch == b'\r' { index += 1; continue; }
+            if ch == b'\n' {
+                lines.push((line_start, index - line_start));
+                index += 1;
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+            let (cp, next) = decode_utf8_at(bytes, index);
+            let advance = if let Some(ref measurer) = self.text_measurer {
+                let ch_char = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                measurer.font().metrics(ch_char, font_size).advance_width
+            } else {
+                font_size * 0.5
+            };
+            if line_width > 0.0 && line_width + advance > content_w {
+                lines.push((line_start, index - line_start));
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+            index = next;
+            line_width += advance;
+        }
+        lines.push((line_start, bytes.len() - line_start));
+        if lines.is_empty() {
+            lines.push((0, 0));
+        }
+        lines
+    }
+
+    /// Like paint_text_wrapped but passes clip_rect to each line (matching C++ text_area).
+    pub fn paint_text_wrapped_clipped(&mut self, rect: Rect, text: &str, font_size: f32,
+                                       color: Color, align: TextAlign, clip: &Rect) {
+        let content_w = rect.w;
+        if content_w <= 0.0 || text.is_empty() {
+            return;
+        }
+
+        let line_h = font_size + 5.0;
+        let mut y = rect.y;
+        let bytes = text.as_bytes();
+        let mut line_start: usize = 0;
+        let mut index: usize = 0;
+        let mut line_width: f32 = 0.0;
+
+        while index < bytes.len() {
+            let ch = bytes[index];
+            if ch == b'\r' { index += 1; continue; }
+            if ch == b'\n' {
+                let line_text = &text[line_start..index];
+                let line_rect = Rect::new(rect.x, y, content_w, line_h);
+                if y + line_h > rect.y && y < rect.y + rect.h {
+                    self.paint_text_clipped(line_rect, line_text, font_size, color, align, Some(clip));
+                }
+                y += line_h;
+                index += 1;
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+            let (cp, next) = decode_utf8_at(bytes, index);
+            let advance = if let Some(ref measurer) = self.text_measurer {
+                let ch_char = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                measurer.font().metrics(ch_char, font_size).advance_width
+            } else {
+                font_size * 0.5
+            };
+            if line_width > 0.0 && line_width + advance > content_w {
+                let line_text = &text[line_start..index];
+                let line_rect = Rect::new(rect.x, y, content_w, line_h);
+                if y + line_h > rect.y && y < rect.y + rect.h {
+                    self.paint_text_clipped(line_rect, line_text, font_size, color, align, Some(clip));
+                }
+                y += line_h;
+                line_start = index;
+                line_width = 0.0;
+                continue;
+            }
+            index = next;
+            line_width += advance;
+        }
+        if line_start <= bytes.len() {
+            let line_text = &text[line_start..];
+            let line_rect = Rect::new(rect.x, y, content_w, line_h);
+            if y + line_h > rect.y && y < rect.y + rect.h {
+                self.paint_text_clipped(line_rect, line_text, font_size, color, align, Some(clip));
+            }
+        }
+    }
+
     pub fn paint_image_rect(&mut self, rect: Rect, image_path: &str, fit: ImageFit, radius: f32) -> usize {
         let hash = context_hash_sv(image_path);
         let offset = self.text_arena.len() as u32;
@@ -1022,6 +1124,11 @@ impl Context {
 
     #[allow(clippy::too_many_lines)]
     pub fn slider(&mut self, id: u64, rect: Rect, value: &mut f32, min: f32, max: f32) -> bool {
+        self.slider_labeled(id, rect, "", value, min, max)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_labeled(&mut self, id: u64, rect: Rect, label: &str, value: &mut f32, min: f32, max: f32) -> bool {
         let min_value = min.min(max);
         let max_value = min.max(max);
         let radius = self.theme.radius;
@@ -1131,6 +1238,16 @@ impl Context {
         let visual_thumb = context_scale_rect_from_center(&thumb, thumb_scale, thumb_scale);
         self.paint_soft_glow(visual_thumb, primary, thumb_radius, thumb_hover_v * 0.14 + thumb_active_v * 0.18, 3.6);
         self.paint_filled_rect(visual_thumb, thumb_color, thumb_radius);
+
+        // Label text (matching C++ add_text(label, ..., theme_.text, label_font, Left) — no clip_rect)
+        if !label.is_empty() {
+            let text_col = self.theme.text;
+            self.paint_text(
+                Rect::new(rect.x + value_padding, rect.y,
+                           rect.w - value_box.w - value_padding * 2.0, rect.h),
+                label, label_font, text_col, TextAlign::Left,
+            );
+        }
 
         // Value box chrome + text
         let input_bg = self.theme.input_bg;
@@ -1353,13 +1470,18 @@ impl Context {
         let input_padding = (rect.h * 0.18).clamp(6.0, 12.0);
         let has_label = !label.is_empty();
         let content_padding = input_padding;
+        let is_multiline = text.contains('\n');
 
         let label_rect = if has_label {
             Rect::new(rect.x, rect.y, rect.w * 0.34, rect.h)
         } else {
             Rect::new(rect.x, rect.y, 0.0, rect.h)
         };
-        let input_rect = if has_label {
+        // C++ text_area uses box_rect directly (no input_padding offset)
+        // C++ text_input uses input_rect = rect + input_padding offset
+        let input_rect = if is_multiline {
+            rect
+        } else if has_label {
             Rect::new(rect.x + rect.w * 0.36, rect.y + input_padding * 0.5,
                        rect.w * 0.64, rect.h - input_padding)
         } else {
@@ -1404,17 +1526,18 @@ impl Context {
         // Input chrome
         let input_bg = self.theme.input_bg;
         let chrome_radius = (self.theme.radius - 2.0).max(0.0);
+        let chrome_id = if is_multiline { 0x1a2b3c4d5e6f7010 } else { 0x1a2b3c4d5e6f7007 };
         self.draw_input_chrome(
-            context_hash_mix(id, 0x1a2b3c4d5e6f7007),
+            context_hash_mix(id, chrome_id),
             input_rect, hovered || editing, editing,
-            input_bg, chrome_radius, if editing { 1.2 } else { 1.0 },
+            if is_multiline { mix(input_bg, self.theme.secondary, 0.08) } else { input_bg },
+            chrome_radius, if editing { 1.2 } else { 1.0 },
         );
 
         // Text content — use wrapped rendering for multiline text
         let text_col = self.theme.text;
         let muted_col = self.theme.muted_text;
-        let is_multiline = text.contains('\n');
-        // For multiline text areas, use C++ text_area font formula: clamp(h*0.13, 13, 22)
+        // C++ text_area font: clamp(h*0.13, 13, 22); text_input font: label_font - 0.5
         let render_font = if is_multiline {
             (input_rect.h * 0.13).clamp(13.0, 22.0)
         } else {
@@ -1425,15 +1548,77 @@ impl Context {
         } else {
             content_padding
         };
-        let content_rect = Rect::new(input_rect.x + text_pad, input_rect.y + text_pad,
-                                      (input_rect.w - text_pad * 2.0).max(0.0),
-                                      (input_rect.h - text_pad * 2.0).max(0.0));
-        if text.is_empty() && !placeholder.is_empty() && !editing {
-            self.paint_text(content_rect, placeholder, value_font, muted_col, TextAlign::Left);
-        } else if is_multiline || self.measure_text(text, render_font) > content_rect.w {
-            self.paint_text_wrapped(content_rect, text, render_font, text_col, TextAlign::Left);
+
+        if is_multiline {
+            // Multiline text area matching C++ internal_text_area_readonly:
+            let content_w = (input_rect.w - text_pad * 2.0 - 2.0).max(24.0);
+            let viewport_h = (input_rect.h - text_pad * 2.0).max(24.0);
+            let content_clip = Rect::new(
+                input_rect.x + text_pad, input_rect.y + text_pad,
+                content_w, viewport_h,
+            );
+            let line_h = render_font + 5.0;
+
+            // First pass: compute line breaks (matching C++ character wrapping)
+            let lines = self.compute_wrapped_lines(text, render_font, content_w);
+            let total_h = lines.len() as f32 * line_h;
+            let max_scroll = (total_h - viewport_h).max(0.0);
+
+            // Scrollbar
+            let scrollbar_w = 8.0_f32;
+            let track = Rect::new(
+                input_rect.x + input_rect.w - text_pad - scrollbar_w,
+                input_rect.y + text_pad,
+                scrollbar_w, viewport_h,
+            );
+            let thumb_h = if max_scroll > 0.0 {
+                (viewport_h * (viewport_h / (viewport_h + 1.0).max(total_h))).max(18.0)
+            } else {
+                viewport_h
+            };
+            let thumb = Rect::new(track.x, track.y, track.w, thumb_h);
+            let secondary = self.theme.secondary;
+            let panel = self.theme.panel;
+            let primary = self.theme.primary;
+            self.paint_filled_rect(track, mix(secondary, panel, 0.45), 3.0);
+            self.paint_filled_rect(thumb, mix(primary, panel, 0.40), 3.0);
+
+            // Draw visible text lines with clip (C++ add_text skips empty lines)
+            let mut y = input_rect.y + text_pad;
+            for (start, len) in &lines {
+                if y > input_rect.y + input_rect.h - text_pad {
+                    break;
+                }
+                if *len > 0 && y + line_h >= input_rect.y + text_pad {
+                    let line_text = &text[*start..*start + *len];
+                    self.paint_text_clipped(
+                        Rect::new(content_clip.x, y, content_w, line_h),
+                        line_text, render_font, text_col, TextAlign::Left, Some(&content_clip),
+                    );
+                }
+                y += line_h;
+            }
         } else {
-            self.paint_text(content_rect, text, render_font, text_col, TextAlign::Left);
+            // C++ draw_static_input_content: text rect = full input height, clip = y+2/h-4
+            let content_clip = Rect::new(
+                input_rect.x + text_pad,
+                input_rect.y + 2.0,
+                (input_rect.w - text_pad * 2.0).max(0.0),
+                (input_rect.h - 4.0).max(0.0),
+            );
+            let display_text = if text.is_empty() && !placeholder.is_empty() && !editing {
+                placeholder
+            } else {
+                text.as_str()
+            };
+            let display_color = if text.is_empty() && !placeholder.is_empty() && !editing {
+                muted_col
+            } else {
+                text_col
+            };
+            let text_w = self.measure_text(display_text, render_font);
+            let text_rect = Rect::new(content_clip.x, input_rect.y, content_clip.w.max(text_w), input_rect.h);
+            self.paint_text_clipped(text_rect, display_text, render_font, display_color, TextAlign::Left, Some(&content_clip));
         }
 
         changed
@@ -1480,16 +1665,24 @@ impl Context {
             mix(input_bg, secondary, 0.08), chrome_radius, 1.0,
         );
 
-        // Value text content matching C++ draw_static_input_content
-        let content_rect = Rect::new(
+        // Value text content matching C++ draw_static_input_content:
+        // text rect uses full input_rect.y/h, clip is content_clip (y+2, h-4)
+        let content_clip = Rect::new(
             input_rect.x + input_padding,
             input_rect.y + 2.0,
             (input_rect.w - input_padding * 2.0).max(0.0),
             (input_rect.h - 4.0).max(0.0),
         );
+        let text_w = self.measure_text(value, value_font);
+        let origin_x = if align_right {
+            content_clip.x + content_clip.w - text_w
+        } else {
+            content_clip.x
+        };
+        let text_rect = Rect::new(origin_x, input_rect.y, content_clip.w.max(text_w), input_rect.h);
         let text_color = if muted { self.theme.muted_text } else { self.theme.text };
         let align = if align_right { TextAlign::Right } else { TextAlign::Left };
-        self.paint_text(content_rect, value, value_font, text_color, align);
+        self.paint_text_clipped(text_rect, value, value_font, text_color, align, Some(&content_clip));
     }
 
     // ── Dropdown ──
@@ -1635,7 +1828,8 @@ impl Context {
         let ch = char::from_u32(codepoint).unwrap_or('\u{FFFD}');
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
-        self.paint_text_clipped(rect, s, font_size, color, TextAlign::Center, Some(&rect))
+        // C++ paint_icon does NOT pass clip_rect by default (only when ClipMode::bounds)
+        self.paint_text_clipped(rect, s, font_size, color, TextAlign::Center, None)
     }
 
     // ── Transform payload ──
