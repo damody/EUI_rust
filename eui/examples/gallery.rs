@@ -467,6 +467,13 @@ fn draw_actor(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u3
     draw_gradient(ctx, rect, top, bottom, 18.0 * s, alpha);
     // Stroke
     draw_stroke(ctx, rect, actor_stroke(p), 18.0 * s, 1.0, 0.92 * alpha);
+    // Inner card matching C++: inset(10*s), radius=10*s, fill=actor_inner_hex
+    // C++ uses .origin_center() per shape — inner fill needs its own rotation origin
+    let inner_rect = inset_rect(&rect, 10.0 * s, 10.0 * s);
+    let inner_alpha = if p.light { 0.32 } else { 0.18 };
+    let saved = ctx.swap_rotation_origin(inner_rect.w * 0.5, inner_rect.h * 0.5);
+    draw_fill(ctx, inner_rect, actor_inner_hex(p), 10.0 * s, inner_alpha);
+    ctx.restore_transform(saved);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,13 +487,16 @@ fn draw_actor_ex(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top:
     draw_stroke(ctx, rect, actor_stroke(p), 18.0 * s, 1.0, 0.92 * alpha);
 
     // Inner shape matching C++: inset(10*s), radius=10*s, fill=actor_inner_hex
+    // C++ uses .origin_center() per shape — inner fill needs its own rotation origin
     let inner_rect = inset_rect(&rect, 10.0 * s, 10.0 * s);
     let inner_alpha = (if p.light { 0.32 } else { 0.18 }) * fill_alpha;
     let inner_hex = actor_inner_hex(p);
+    let saved = ctx.swap_rotation_origin(inner_rect.w * 0.5, inner_rect.h * 0.5);
     if blur_radius > 0.0 || backdrop_blur > 0.0 {
         ctx.paint_backdrop_blur(inner_rect, backdrop_blur * 0.35, 10.0 * s);
     }
     draw_fill(ctx, inner_rect, inner_hex, 10.0 * s, inner_alpha);
+    ctx.restore_transform(saved);
 }
 
 fn draw_actor_default(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, alpha: f32) {
@@ -534,14 +544,18 @@ fn draw_rotate_demo(ctx: &mut Context, rect: Rect, s: f32, time: f64, p: &Galler
     draw_stage_background(ctx, rect, s, p);
     let cx = rect.x + rect.w * 0.5;
     let cy = rect.y + rect.h * 0.5;
+    // Circle outline (drawn before crosshairs, matching C++)
+    draw_stroke(ctx, Rect::new(cx - 132.0 * s, cy - 132.0 * s, 264.0 * s, 264.0 * s), demo_axis(p), 132.0 * s, 1.0 * s, 0.42);
     // Crosshairs
     draw_fill(ctx, Rect::new(cx - 1.0, rect.y + 48.0 * s, 2.0, rect.h - 96.0 * s), demo_axis(p), 0.0, 0.66);
     draw_fill(ctx, Rect::new(rect.x + 48.0 * s, cy - 1.0, rect.w - 96.0 * s, 2.0), demo_axis(p), 0.0, 0.66);
-    // Circle outline
-    draw_stroke(ctx, Rect::new(cx - 132.0 * s, cy - 132.0 * s, 264.0 * s, 264.0 * s), demo_axis(p), 132.0 * s, 1.0 * s, 0.42);
-    // Actor (no rotation support in our renderer, just show oscillating position)
-    let _t = loop_progress(time, 2.40);
-    draw_actor(ctx, Rect::new(cx - 92.0 * s, cy - 42.0 * s, 184.0 * s, 84.0 * s), s, p, actor_focus_top(p), actor_focus_bottom(p), 1.0);
+    // Actor with rotation matching C++: .rotate(angle).origin_center()
+    let t = loop_progress(time, 2.40);
+    let angle = 360.0 * t;
+    let actor_rect = Rect::new(cx - 92.0 * s, cy - 42.0 * s, 184.0 * s, 84.0 * s);
+    ctx.push_rotation(angle, actor_rect.w * 0.5, actor_rect.h * 0.5);
+    draw_actor(ctx, actor_rect, s, p, actor_focus_top(p), actor_focus_bottom(p), 1.0);
+    ctx.pop_transform();
     // Center dot
     draw_fill(ctx, Rect::new(cx - 7.0 * s, cy - 7.0 * s, 14.0 * s, 14.0 * s), actor_glass_top(p), 7.0 * s, 0.98);
 }
@@ -1135,7 +1149,7 @@ fn draw_animation_page(ctx: &mut Context, state: &mut GalleryState, rect: Rect, 
 
     // Selector
     if let Some(selector_rect) = rows.first() {
-        draw_card(ctx, *selector_rect, "Animation Catalog", s, &p, |ctx, content| {
+        draw_card_r(ctx, *selector_rect, "Animation Catalog", s, &p, 20.0 * s, |ctx, content| {
             let sections = LinearLayout::column(content).gap(12.0 * s)
                 .items(&[fr(1.0), px(24.0 * s)]).resolve();
 
@@ -1678,8 +1692,10 @@ fn draw_stage(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32, t
 // ── Card helper ──
 
 fn draw_card(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPalette, body: impl FnOnce(&mut Context, Rect)) {
-    // Card radius/padding/shadow matching C++ SurfaceBuilder(card): radius=22*s, padding=16 (unscaled), shadow(0,10,18)
-    let card_radius = 22.0 * s;
+    draw_card_r(ctx, rect, title, s, p, 22.0 * s, body);
+}
+
+fn draw_card_r(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPalette, card_radius: f32, body: impl FnOnce(&mut Context, Rect)) {
     draw_shadow_card(ctx, rect, card_radius, 10.0, 18.0, 0x020617, 0.12);
     draw_fill(ctx, rect, p.surface_alt, card_radius, 1.0);
     draw_stroke(ctx, rect, p.border, card_radius, 1.0, 1.0);
