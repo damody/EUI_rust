@@ -175,23 +175,50 @@ impl RendererBackend for OpenGlRenderer {
                                     // Use corrected font_size so fontdue renders at the same
                                     // visual scale as STB truetype measures.
                                     let render_fs = font_atlas.render_font_size(cmd.font_size);
-                                    let line_metrics = font_atlas.font.horizontal_line_metrics(render_fs);
-                                    let ascent = line_metrics.map(|m| m.ascent).unwrap_or(render_fs * 0.8);
-                                    let total_width: f32 = text.chars().map(|ch| font_atlas.font.metrics(ch, render_fs).advance_width).sum();
+
+                                    // Two-pass approach matching C++ opengl_renderer_detail.inl:
+                                    // Pass 1: compute max_above, max_below, total_width from glyph metrics
+                                    let mut max_above: f32 = 0.0;
+                                    let mut max_below: f32 = 0.0;
+                                    let mut total_width: f32 = 0.0;
+                                    for ch in text.chars() {
+                                        let m = font_atlas.font.metrics(ch, render_fs);
+                                        // fontdue ymin: bottom of glyph relative to baseline (y-up)
+                                        // above baseline = ymin + height, below baseline = -ymin
+                                        let above = (m.ymin as f32 + m.height as f32).max(0.0);
+                                        let below = (-(m.ymin as f32)).max(0.0);
+                                        max_above = max_above.max(above);
+                                        max_below = max_below.max(below);
+                                        total_width += m.advance_width;
+                                    }
+                                    // Fallback to face metrics if glyph metrics insufficient (matching C++)
+                                    if max_above + max_below < 1.0 {
+                                        if let Some(lm) = font_atlas.font.horizontal_line_metrics(render_fs) {
+                                            max_above = lm.ascent;
+                                            max_below = -lm.descent;
+                                        } else {
+                                            max_above = render_fs * 0.72;
+                                            max_below = render_fs * 0.28;
+                                        }
+                                    }
+
+                                    let text_h = (max_above + max_below).max(1.0);
+                                    let baseline_y = (cmd.rect.y + (cmd.rect.h - text_h).max(0.0) * 0.5 + max_above).round();
+
                                     let start_x = match cmd.align {
                                         TextAlign::Left => cmd.rect.x,
                                         TextAlign::Center => cmd.rect.x + (cmd.rect.w - total_width) * 0.5,
                                         TextAlign::Right => cmd.rect.x + cmd.rect.w - total_width,
                                     };
-                                    let baseline_y = cmd.rect.y + (cmd.rect.h - render_fs) * 0.5 + ascent;
 
+                                    // Pass 2: render glyphs at baseline
                                     let mut verts = Vec::new();
                                     let mut pen_x = start_x;
                                     for ch in text.chars() {
                                         let entry = font_atlas.get_or_rasterize(&gl_ref, ch, render_fs);
                                         if entry.width > 0.0 && entry.height > 0.0 {
-                                            let gx = pen_x + entry.offset_x;
-                                            let gy = baseline_y - entry.offset_y - entry.height;
+                                            let gx = (pen_x + entry.offset_x).round();
+                                            let gy = (baseline_y - entry.offset_y - entry.height).round();
                                             push_textured_quad(
                                                 &mut verts,
                                                 gx, gy, entry.width, entry.height,
