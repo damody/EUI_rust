@@ -930,7 +930,26 @@ impl Context {
         state.active
     }
 
+    pub fn presence_ex(&mut self, id: u64, visible: bool, speed_in: f32, speed_out: f32) -> f32 {
+        let dt = self.ui_dt;
+        let state = self.motion_states.entry(id).or_default();
+        state.last_touched_frame = self.frame_index;
+
+        let target = if visible { 1.0 } else { 0.0 };
+        if !state.initialized {
+            state.active = target;
+            state.initialized = true;
+        }
+        let speed = if visible { speed_in } else { speed_out };
+        state.active = Self::animate_motion_channel(state.active, target, speed, dt);
+        state.active
+    }
+
     pub fn animated_value(&mut self, id: u64, target: f32) -> f32 {
+        self.animated_value_ex(id, target, 10.0)
+    }
+
+    pub fn animated_value_ex(&mut self, id: u64, target: f32, speed: f32) -> f32 {
         let dt = self.ui_dt;
         let state = self.motion_states.entry(id).or_default();
         state.last_touched_frame = self.frame_index;
@@ -939,10 +958,19 @@ impl Context {
             state.value = target;
             state.value_initialized = true;
         }
-        // Use same exponential decay as C++ update_motion_value (speed 10.0 default)
-        let blend = 1.0 - (-10.0_f32 * dt).exp();
+        let blend = 1.0 - (-speed * dt).exp();
         state.value += (target - state.value) * blend;
         state.value
+    }
+
+    pub fn animated_value_read(&self, id: u64, default: f32) -> f32 {
+        self.motion_states.get(&id).map_or(default, |s| s.value)
+    }
+
+    pub fn animated_value_reset(&mut self, id: u64, value: f32) {
+        let state = self.motion_states.entry(id).or_default();
+        state.value = value;
+        state.value_initialized = true;
     }
 
     /// Full motion state with focus and active channels, matching C++ update_motion_state.
