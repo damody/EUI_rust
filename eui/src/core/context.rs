@@ -103,6 +103,9 @@ pub struct Context {
     // Global alpha
     pub(crate) global_alpha: f32,
 
+    // Current transform (applied to all pushed commands)
+    pub(crate) current_transform_index: u32,
+
     // Active slider tracking
     pub(crate) active_slider_id: u64,
 
@@ -139,6 +142,7 @@ impl Context {
             focus_id: 0,
             memory_assets: HashMap::new(),
             global_alpha: 1.0,
+            current_transform_index: K_INVALID_PAYLOAD_INDEX,
             active_slider_id: 0,
             cmd_underuse: 0,
             text_underuse: 0,
@@ -169,6 +173,7 @@ impl Context {
         self.text_arena.clear();
         self.brush_payloads.clear();
         self.transform_payloads.clear();
+        self.current_transform_index = K_INVALID_PAYLOAD_INDEX;
         self.layout_stack.clear();
         self.scope_stack.clear();
         self.clip_stack.clear();
@@ -272,13 +277,19 @@ impl Context {
 
     /// Apply effective clip to a command. Returns false if the command is fully clipped.
     fn apply_clip_to_command(&self, cmd: &mut DrawCommand, requested_clip: Option<&Rect>) -> bool {
+        // Use pre-computed visible_rect (from rotation transform) if available, else use rect
+        let base_vis = if cmd.visible_rect.w > 0.0 && cmd.visible_rect.h > 0.0 {
+            cmd.visible_rect
+        } else {
+            cmd.rect
+        };
         let (effective, has_clip) = self.resolve_effective_clip(requested_clip);
         if !has_clip {
-            cmd.visible_rect = cmd.rect;
+            cmd.visible_rect = base_vis;
             return true;
         }
         let effective = effective.unwrap();
-        if let Some(vis) = context_intersect_rects(&cmd.rect, &effective) {
+        if let Some(vis) = context_intersect_rects(&base_vis, &effective) {
             cmd.has_clip = true;
             cmd.clip_rect = effective;
             cmd.visible_rect = vis;
@@ -291,6 +302,40 @@ impl Context {
     fn push_command_with_clip(&mut self, mut cmd: DrawCommand, requested_clip: Option<&Rect>) -> usize {
         if self.global_alpha < 1.0 {
             cmd.color.a *= self.global_alpha;
+        }
+        if self.current_transform_index != K_INVALID_PAYLOAD_INDEX {
+            cmd.transform_payload_index = self.current_transform_index;
+            // Compute visible_rect as axis-aligned bounding box of rotated rect
+            if let Some(t) = self.transform_payloads.get(self.current_transform_index as usize) {
+                if t.rotation_z_deg.abs() > 0.001 {
+                    let cx = cmd.rect.x + t.origin_x;
+                    let cy = cmd.rect.y + t.origin_y;
+                    let rad = t.rotation_z_deg * std::f32::consts::PI / 180.0;
+                    let cos_a = rad.cos();
+                    let sin_a = rad.sin();
+                    let corners = [
+                        (cmd.rect.x, cmd.rect.y),
+                        (cmd.rect.x + cmd.rect.w, cmd.rect.y),
+                        (cmd.rect.x + cmd.rect.w, cmd.rect.y + cmd.rect.h),
+                        (cmd.rect.x, cmd.rect.y + cmd.rect.h),
+                    ];
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for (px, py) in corners {
+                        let dx = px - cx;
+                        let dy = py - cy;
+                        let rx = cx + dx * cos_a - dy * sin_a;
+                        let ry = cy + dx * sin_a + dy * cos_a;
+                        min_x = min_x.min(rx);
+                        min_y = min_y.min(ry);
+                        max_x = max_x.max(rx);
+                        max_y = max_y.max(ry);
+                    }
+                    cmd.visible_rect = Rect::new(min_x, min_y, max_x - min_x, max_y - min_y);
+                }
+            }
         }
         if !self.apply_clip_to_command(&mut cmd, requested_clip) {
             return usize::MAX;
@@ -2393,6 +2438,42 @@ impl Context {
         let idx = self.transform_payloads.len() as u32;
         self.transform_payloads.push(transform);
         idx
+    }
+
+    /// Push a rotation transform. All subsequent draw commands will have this transform
+    /// until `pop_transform()` is called. Origin is relative to each command's rect.
+    pub fn push_rotation(&mut self, angle_deg: f32, origin_x: f32, origin_y: f32) {
+        let transform = Transform3D {
+            rotation_z_deg: angle_deg,
+            origin_x,
+            origin_y,
+            ..Default::default()
+        };
+        self.current_transform_index = self.push_transform_3d(transform);
+    }
+
+    pub fn pop_transform(&mut self) {
+        self.current_transform_index = K_INVALID_PAYLOAD_INDEX;
+    }
+
+    /// If a rotation transform is active, push a new one with the same angle but
+    /// a different origin. Returns the previous transform index for restoring later.
+    /// If no transform is active, does nothing and returns K_INVALID_PAYLOAD_INDEX.
+    pub fn swap_rotation_origin(&mut self, new_ox: f32, new_oy: f32) -> u32 {
+        let old_idx = self.current_transform_index;
+        if old_idx != K_INVALID_PAYLOAD_INDEX {
+            if let Some(t) = self.transform_payloads.get(old_idx as usize).copied() {
+                if t.rotation_z_deg.abs() > 0.001 {
+                    self.push_rotation(t.rotation_z_deg, new_ox, new_oy);
+                }
+            }
+        }
+        old_idx
+    }
+
+    /// Restore a previously saved transform index from swap_rotation_origin.
+    pub fn restore_transform(&mut self, idx: u32) {
+        self.current_transform_index = idx;
     }
 }
 

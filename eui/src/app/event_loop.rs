@@ -246,6 +246,7 @@ impl ApplicationHandler for AppHandler {
                 let draw_data = DrawDataView {
                     commands: state.ctx.commands(),
                     text_arena: state.ctx.text_arena(),
+                    transform_payloads: state.ctx.transform_payloads(),
                 };
                 state.renderer.render(&draw_data, &metrics);
                 state.renderer.end_frame();

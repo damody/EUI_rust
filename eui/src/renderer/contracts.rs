@@ -1,4 +1,5 @@
 use crate::core::draw_command::DrawCommand;
+use crate::graphics::transforms::Transform3D;
 use crate::runtime::contracts::WindowMetrics;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,6 +20,7 @@ impl Default for ClearState {
 pub struct DrawDataView<'a> {
     pub commands: &'a [DrawCommand],
     pub text_arena: &'a [u8],
+    pub transform_payloads: &'a [Transform3D],
 }
 
 pub trait RendererBackend {
