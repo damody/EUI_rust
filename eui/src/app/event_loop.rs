@@ -153,7 +153,8 @@ impl ApplicationHandler for AppHandler {
         if let Some(data) = font_data {
             if let Some(measurer) = TextMeasurer::new(&data) {
                 let font = measurer.font().clone();
-                unsafe { renderer.set_font(font); }
+                let ratio = measurer.stb_to_fontdue_ratio();
+                unsafe { renderer.set_font(font, ratio); }
                 ctx.set_text_measurer(measurer);
             }
         }

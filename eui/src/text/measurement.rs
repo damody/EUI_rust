@@ -82,6 +82,35 @@ impl TextMeasurer {
         &self.font
     }
 
+    /// Compute the ratio to convert STB pixel_height to fontdue font_size
+    /// so that fontdue renders glyphs at the same visual scale as STB measures.
+    ///
+    /// STB scale = pixel_height / (raw_ascent - raw_descent)
+    /// fontdue scale = font_size / units_per_em
+    /// To match: fontdue_fs = stb_pixel_height * units_per_em / (raw_ascent - raw_descent)
+    /// This method returns units_per_em / (raw_ascent - raw_descent).
+    pub fn stb_to_fontdue_ratio(&self) -> f32 {
+        let vm = self.stb_font.get_v_metrics();
+        let raw_asc_desc = (vm.ascent - vm.descent) as f32;
+        if raw_asc_desc.abs() < 1.0 {
+            return 1.0;
+        }
+        // Derive units_per_em from fontdue: at a reference size,
+        // fontdue_ascent = raw_ascent * ref_size / upm
+        // => upm = raw_ascent * ref_size / fontdue_ascent
+        let ref_size = 100.0;
+        if let Some(metrics) = self.font.horizontal_line_metrics(ref_size) {
+            if metrics.ascent.abs() > 0.001 {
+                let upm = vm.ascent as f32 * ref_size / metrics.ascent;
+                upm / raw_asc_desc
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        }
+    }
+
     pub fn rasterize(&self, ch: char, font_size: f32) -> (fontdue::Metrics, Vec<u8>) {
         self.font.rasterize(ch, font_size)
     }

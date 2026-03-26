@@ -53,11 +53,11 @@ impl OpenGlRenderer {
         })
     }
 
-    pub unsafe fn set_font(&mut self, font: fontdue::Font) {
+    pub unsafe fn set_font(&mut self, font: fontdue::Font, stb_to_fontdue_ratio: f32) {
         if let Some(ref atlas) = self.font_atlas {
             atlas.destroy(&self.gl);
         }
-        self.font_atlas = Some(FontAtlas::new(&self.gl, font));
+        self.font_atlas = Some(FontAtlas::new(&self.gl, font, stb_to_fontdue_ratio));
     }
 
     unsafe fn flush_vertices(&self, vertices: &[Vertex], tex_mode: TextureMode, texture: Option<glow::Texture>) {
@@ -172,21 +172,23 @@ impl RendererBackend for OpenGlRenderer {
                             if !text.is_empty() {
                                 if let Some(ref mut font_atlas) = self.font_atlas {
                                     let gl_ref = Rc::clone(&self.gl);
-                                    let font_size = cmd.font_size;
-                                    let line_metrics = font_atlas.font.horizontal_line_metrics(font_size);
-                                    let ascent = line_metrics.map(|m| m.ascent).unwrap_or(font_size * 0.8);
-                                    let total_width: f32 = text.chars().map(|ch| font_atlas.font.metrics(ch, font_size).advance_width).sum();
+                                    // Use corrected font_size so fontdue renders at the same
+                                    // visual scale as STB truetype measures.
+                                    let render_fs = font_atlas.render_font_size(cmd.font_size);
+                                    let line_metrics = font_atlas.font.horizontal_line_metrics(render_fs);
+                                    let ascent = line_metrics.map(|m| m.ascent).unwrap_or(render_fs * 0.8);
+                                    let total_width: f32 = text.chars().map(|ch| font_atlas.font.metrics(ch, render_fs).advance_width).sum();
                                     let start_x = match cmd.align {
                                         TextAlign::Left => cmd.rect.x,
                                         TextAlign::Center => cmd.rect.x + (cmd.rect.w - total_width) * 0.5,
                                         TextAlign::Right => cmd.rect.x + cmd.rect.w - total_width,
                                     };
-                                    let baseline_y = cmd.rect.y + (cmd.rect.h - font_size) * 0.5 + ascent;
+                                    let baseline_y = cmd.rect.y + (cmd.rect.h - render_fs) * 0.5 + ascent;
 
                                     let mut verts = Vec::new();
                                     let mut pen_x = start_x;
                                     for ch in text.chars() {
-                                        let entry = font_atlas.get_or_rasterize(&gl_ref, ch, font_size);
+                                        let entry = font_atlas.get_or_rasterize(&gl_ref, ch, render_fs);
                                         if entry.width > 0.0 && entry.height > 0.0 {
                                             let gx = pen_x + entry.offset_x;
                                             let gy = baseline_y - entry.offset_y - entry.height;

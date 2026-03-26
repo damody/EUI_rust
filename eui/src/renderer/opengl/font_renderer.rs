@@ -23,10 +23,19 @@ pub struct FontAtlas {
     pub row_height: u32,
     pub glyphs: HashMap<(char, u32), GlyphEntry>,
     pub font: Font,
+    /// Ratio to convert STB pixel_height to fontdue font_size:
+    /// render_fs = round(cmd_fs * 1.20) * stb_to_fontdue_ratio
+    pub stb_to_fontdue_ratio: f32,
 }
 
 impl FontAtlas {
-    pub unsafe fn new(gl: &glow::Context, font: Font) -> Self {
+    /// Convert a DrawCommand font_size to the fontdue render font_size
+    /// that matches the STB measurement scale.
+    pub fn render_font_size(&self, cmd_font_size: f32) -> f32 {
+        (cmd_font_size * 1.20_f32).round() * self.stb_to_fontdue_ratio
+    }
+
+    pub unsafe fn new(gl: &glow::Context, font: Font, stb_to_fontdue_ratio: f32) -> Self {
         let atlas_w = 1024u32;
         let atlas_h = 1024u32;
         let texture = gl.create_texture().expect("create font atlas texture");
@@ -53,6 +62,7 @@ impl FontAtlas {
             row_height: 0,
             glyphs: HashMap::new(),
             font,
+            stb_to_fontdue_ratio,
         }
     }
 
