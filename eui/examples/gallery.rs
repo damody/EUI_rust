@@ -800,7 +800,12 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             // C++ dropdown_track_h = max(34, dropdown_padding*3) + (open ? body : 0)
             let dropdown_padding = 10.0 * s;
             let dropdown_header_h = 34.0_f32.max(dropdown_padding * 3.0);
-            let dropdown_track_h = dropdown_header_h; // closed state
+            let dropdown_body_h = 104.0 * s;
+            let dropdown_track_h = if state.controls_dropdown_open {
+                dropdown_header_h + dropdown_body_h
+            } else {
+                dropdown_header_h
+            };
             let rows = LinearLayout::column(content).gap(8.0 * s)
                 .items(&[px(38.0 * s), px(dropdown_track_h), px(normal_h), px(normal_h), px(progress_track_h), px(compact_h), px(normal_h)]).resolve();
 
@@ -808,24 +813,14 @@ fn draw_basic_controls_page(ctx: &mut Context, state: &mut GalleryState, rect: R
             if !rows.is_empty() {
                 ctx.text_input_field_ex(hash_str("search_input"), rows[0], "Search", &mut state.search_text, "Type to filter");
             }
-            // Row 1: Density dropdown placeholder — match C++ dropdown chrome
+            // Row 1: Density dropdown — expanding with selectable items
             if rows.len() > 1 {
-                let dr = rows[1];
-                let dd_radius = ctx.theme().radius;
-                let dd_fill = ctx.theme().panel;
-                let dd_outline = ctx.theme().outline;
-                let dd_text_color = ctx.theme().text;
-                let dd_muted = ctx.theme().muted_text;
-                ctx.paint_filled_rect(dr, dd_fill, dd_radius);
-                ctx.paint_outline_rect(dr, dd_outline, dd_radius, 1.0);
-                let header_font = (dr.h * 0.38).clamp(13.0, 24.0);
-                let header_pad = (dr.h * 0.28).clamp(10.0, 22.0);
-                let indicator_size = (dr.h * 0.34).clamp(10.0, 18.0);
-                let text_rect = Rect::new(dr.x + header_pad, dr.y, dr.w - header_pad * 2.0 - indicator_size - 6.0, dr.h);
-                ctx.paint_text(text_rect, &dropdown_label, header_font, dd_text_color, TextAlign::Left);
-                let chevron_rect = Rect::new(dr.x + dr.w - header_pad - indicator_size, dr.y + (dr.h - indicator_size) * 0.5, indicator_size, indicator_size);
-                let chevron_thickness = (dr.h * 0.065).clamp(1.4, 2.4);
-                ctx.paint_chevron_ex(chevron_rect, dd_muted, 0.0, chevron_thickness);
+                ctx.dropdown_select(
+                    hash_str("density_dropdown"), rows[1], &dropdown_label,
+                    &mut state.controls_dropdown_open,
+                    &control_modes_labels, &mut state.controls_mode,
+                    dropdown_body_h, dropdown_padding,
+                );
             }
             // Row 2: Progress slider (C++ ui.slider("Progress", ...) — label drawn internally)
             if rows.len() > 2 {
