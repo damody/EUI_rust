@@ -108,11 +108,21 @@ pub struct ContextTextAreaState {
     pub scroll: f32,
     pub preferred_x: f32,
     pub last_touched_frame: u64,
+    pub cursor: usize,
+    pub sel_start: usize,
+    pub dragging: bool,
 }
 
 impl Default for ContextTextAreaState {
     fn default() -> Self {
-        Self { scroll: 0.0, preferred_x: -1.0, last_touched_frame: 0 }
+        Self {
+            scroll: 0.0,
+            preferred_x: -1.0,
+            last_touched_frame: 0,
+            cursor: 0,
+            sel_start: 0,
+            dragging: false,
+        }
     }
 }
 

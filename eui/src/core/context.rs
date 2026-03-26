@@ -41,6 +41,23 @@ fn decode_utf8_at(bytes: &[u8], pos: usize) -> (u32, usize) {
     ((b0 & 0x07) << 18 | b1 << 12 | b2 << 6 | b3, pos + 4)
 }
 
+/// Find which wrapped line a byte offset falls into.
+fn find_line_for_offset(lines: &[(usize, usize)], offset: usize) -> usize {
+    for (i, (start, len)) in lines.iter().enumerate() {
+        if offset <= start + len {
+            // If offset is exactly at line boundary, prefer previous line end
+            // unless it's the first line
+            if offset == *start + *len && i + 1 < lines.len() && offset == lines[i + 1].0 {
+                // offset sits at the boundary; if it matches the next line start,
+                // it belongs to the next line only if we're mid-string
+                continue;
+            }
+            return i;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
 #[allow(dead_code)]
 pub struct Context {
     // Drawing
@@ -280,6 +297,16 @@ impl Context {
             radius,
             ..Default::default()
         })
+    }
+
+    pub fn paint_filled_rect_clipped(&mut self, rect: Rect, color: Color, radius: f32, clip_rect: Option<&Rect>) -> usize {
+        self.push_command_with_clip(DrawCommand {
+            command_type: CommandType::FilledRect,
+            rect,
+            color,
+            radius,
+            ..Default::default()
+        }, clip_rect)
     }
 
     pub fn paint_filled_rect_with_brush(&mut self, rect: Rect, brush: Brush, radius: f32) -> usize {
@@ -1461,7 +1488,7 @@ impl Context {
         self.text_input_field_ex(id, rect, "", text, "")
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
     pub fn text_input_field_ex(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str) -> bool {
         // Font sizing matching C++
         let label_font = (rect.h * 0.40).clamp(13.0, 24.0);
@@ -1469,15 +1496,13 @@ impl Context {
         let input_padding = (rect.h * 0.18).clamp(6.0, 12.0);
         let has_label = !label.is_empty();
         let content_padding = input_padding;
-        let is_multiline = text.contains('\n');
+        let is_multiline = text.contains('\n') || rect.h > 80.0;
 
         let label_rect = if has_label {
             Rect::new(rect.x, rect.y, rect.w * 0.34, rect.h)
         } else {
             Rect::new(rect.x, rect.y, 0.0, rect.h)
         };
-        // C++ text_area uses box_rect directly (no input_padding offset)
-        // C++ text_input uses input_rect = rect + input_padding offset
         let input_rect = if is_multiline {
             rect
         } else if has_label {
@@ -1495,32 +1520,40 @@ impl Context {
         }
 
         let hovered = input_rect.contains(self.input.mouse_x, self.input.mouse_y);
-        let _focused = self.focus_id == id;
 
         if hovered && self.input.mouse_pressed {
             self.focus_id = id;
         }
 
-        // Handle input when focused
-        let mut changed = false;
         let editing = self.focus_id == id;
-        if editing {
-            if !self.input.text_input.is_empty() {
-                text.push_str(&self.input.text_input);
-                // Enforce 256 char limit
-                if text.len() > 256 {
-                    text.truncate(256);
-                }
-                changed = true;
-            }
-            if self.input.key_backspace && !text.is_empty() {
-                text.pop();
-                changed = true;
-            }
-            if self.input.key_escape || self.input.key_enter || (self.input.mouse_pressed && !hovered) {
-                self.focus_id = 0;
-            }
-        }
+
+        // ── Text area state (cursor/selection) ──
+        let ta_state = self.text_area_states.entry(id).or_default();
+        ta_state.last_touched_frame = self.frame_index;
+        // Clamp cursor/sel_start to text length
+        ta_state.cursor = ta_state.cursor.min(text.len());
+        ta_state.sel_start = ta_state.sel_start.min(text.len());
+        // Extract state to local vars to avoid borrow issues
+        let mut cursor = ta_state.cursor;
+        let mut sel_start = ta_state.sel_start;
+        let mut dragging = ta_state.dragging;
+        let mut scroll = ta_state.scroll;
+        let mut preferred_x = ta_state.preferred_x;
+
+        // ── Compute layout params ──
+        let text_col = self.theme.text;
+        let muted_col = self.theme.muted_text;
+        let render_font = if is_multiline {
+            (input_rect.h * 0.13).clamp(13.0, 22.0)
+        } else {
+            value_font
+        };
+        let text_pad = if is_multiline {
+            (input_rect.h * 0.03).clamp(6.0, 10.0)
+        } else {
+            content_padding
+        };
+        let line_h = render_font + 5.0;
 
         // Input chrome
         let input_bg = self.theme.input_bg;
@@ -1533,60 +1566,363 @@ impl Context {
             chrome_radius, if editing { 1.2 } else { 1.0 },
         );
 
-        // Text content — use wrapped rendering for multiline text
-        let text_col = self.theme.text;
-        let muted_col = self.theme.muted_text;
-        // C++ text_area font: clamp(h*0.13, 13, 22); text_input font: label_font - 0.5
-        let render_font = if is_multiline {
-            (input_rect.h * 0.13).clamp(13.0, 22.0)
+        // ── Compute wrapped lines for multiline ──
+        let content_w = if is_multiline {
+            (input_rect.w - text_pad * 2.0 - 2.0).max(24.0)
         } else {
-            value_font
+            (input_rect.w - text_pad * 2.0).max(0.0)
         };
-        let text_pad = if is_multiline {
-            (input_rect.h * 0.03).clamp(6.0, 10.0)
+        let lines: Vec<(usize, usize)> = if is_multiline {
+            self.compute_wrapped_lines(text, render_font, content_w)
         } else {
-            content_padding
+            vec![(0, text.len())]
         };
 
+        // ── Helper: hit-test byte offset from pixel position ──
+        let content_top = if is_multiline { input_rect.y + text_pad - scroll } else { input_rect.y };
+        let content_left = if is_multiline { input_rect.x + text_pad } else { input_rect.x + text_pad };
+
+        let hit_test = |mx: f32, my: f32, text_bytes: &str, lines: &[(usize, usize)], measurer: &Option<TextMeasurer>| -> usize {
+            let line_idx = if is_multiline {
+                let row = ((my - content_top) / line_h).floor() as i32;
+                (row.max(0) as usize).min(lines.len().saturating_sub(1))
+            } else {
+                0
+            };
+            let (line_start, line_len) = lines[line_idx];
+            let line_str = &text_bytes[line_start..line_start + line_len];
+            let rel_x = mx - content_left;
+            // Walk chars to find nearest byte offset
+            let mut x_acc = 0.0_f32;
+            let mut best_offset = line_start;
+            for (i, ch) in line_str.char_indices() {
+                let adv = if let Some(ref m) = measurer {
+                    m.measure_char_advance(ch, render_font)
+                } else {
+                    render_font * 0.5
+                };
+                if rel_x < x_acc + adv * 0.5 {
+                    best_offset = line_start + i;
+                    return best_offset;
+                }
+                x_acc += adv;
+                best_offset = line_start + i + ch.len_utf8();
+            }
+            best_offset
+        };
+
+        // ── Mouse interaction ──
+        let mut changed = false;
+        if editing {
+            // Mouse press: set cursor position
+            if self.input.mouse_pressed && hovered {
+                let pos = hit_test(self.input.mouse_x, self.input.mouse_y, text, &lines, &self.text_measurer);
+                cursor = pos;
+                if !self.input.key_shift {
+                    sel_start = pos;
+                }
+                dragging = true;
+                preferred_x = -1.0;
+            }
+            // Mouse drag: extend selection
+            if self.input.mouse_down && dragging && !self.input.mouse_pressed {
+                let pos = hit_test(self.input.mouse_x, self.input.mouse_y, text, &lines, &self.text_measurer);
+                cursor = pos;
+                preferred_x = -1.0;
+            }
+            if self.input.mouse_released {
+                dragging = false;
+            }
+
+            let has_selection = cursor != sel_start;
+            let sel_min = cursor.min(sel_start);
+            let sel_max = cursor.max(sel_start);
+
+            // ── Keyboard navigation ──
+            if self.input.key_left {
+                if cursor > 0 {
+                    // Move back one char (UTF-8 aware)
+                    let mut pos = cursor - 1;
+                    while pos > 0 && !text.is_char_boundary(pos) { pos -= 1; }
+                    cursor = pos;
+                }
+                if !self.input.key_shift { sel_start = cursor; }
+                preferred_x = -1.0;
+            }
+            if self.input.key_right {
+                if cursor < text.len() {
+                    let mut pos = cursor + 1;
+                    while pos < text.len() && !text.is_char_boundary(pos) { pos += 1; }
+                    cursor = pos;
+                }
+                if !self.input.key_shift { sel_start = cursor; }
+                preferred_x = -1.0;
+            }
+            if self.input.key_home {
+                // Move to start of current line
+                let line_idx = find_line_for_offset(&lines, cursor);
+                cursor = lines[line_idx].0;
+                if !self.input.key_shift { sel_start = cursor; }
+                preferred_x = -1.0;
+            }
+            if self.input.key_end {
+                // Move to end of current line
+                let line_idx = find_line_for_offset(&lines, cursor);
+                let (start, len) = lines[line_idx];
+                cursor = start + len;
+                if !self.input.key_shift { sel_start = cursor; }
+                preferred_x = -1.0;
+            }
+            if (self.input.key_up || self.input.key_down) && is_multiline {
+                let line_idx = find_line_for_offset(&lines, cursor);
+                // Compute preferred_x if not set
+                if preferred_x < 0.0 {
+                    let (ls, _) = lines[line_idx];
+                    preferred_x = self.measure_text(&text[ls..cursor], render_font);
+                }
+                let new_line = if self.input.key_up {
+                    line_idx.saturating_sub(1)
+                } else {
+                    (line_idx + 1).min(lines.len() - 1)
+                };
+                if new_line != line_idx {
+                    // Find byte offset in new line closest to preferred_x
+                    let (ls, ll) = lines[new_line];
+                    let line_str = &text[ls..ls + ll];
+                    let mut x_acc = 0.0_f32;
+                    let mut new_cursor = ls;
+                    for (i, ch) in line_str.char_indices() {
+                        let adv = if let Some(ref m) = self.text_measurer {
+                            m.measure_char_advance(ch, render_font)
+                        } else {
+                            render_font * 0.5
+                        };
+                        if x_acc + adv * 0.5 > preferred_x {
+                            new_cursor = ls + i;
+                            break;
+                        }
+                        x_acc += adv;
+                        new_cursor = ls + i + ch.len_utf8();
+                    }
+                    cursor = new_cursor;
+                }
+                if !self.input.key_shift { sel_start = cursor; }
+                // Don't reset preferred_x on up/down
+            }
+
+            // ── Select All ──
+            if self.input.key_select_all {
+                sel_start = 0;
+                cursor = text.len();
+            }
+
+            // ── Copy ──
+            if self.input.key_copy && has_selection {
+                self.input.clipboard_out = text[sel_min..sel_max].to_string();
+            }
+
+            // ── Cut ──
+            if self.input.key_cut && has_selection {
+                self.input.clipboard_out = text[sel_min..sel_max].to_string();
+                text.replace_range(sel_min..sel_max, "");
+                cursor = sel_min;
+                sel_start = sel_min;
+                changed = true;
+                preferred_x = -1.0;
+            }
+
+            // ── Paste ──
+            if self.input.key_paste && !self.input.clipboard_text.is_empty() {
+                let paste_text = self.input.clipboard_text.clone();
+                // Single-line: strip newlines
+                let paste_text = if !is_multiline {
+                    paste_text.replace('\n', " ").replace('\r', "")
+                } else {
+                    paste_text.replace('\r', "")
+                };
+                if has_selection {
+                    text.replace_range(sel_min..sel_max, &paste_text);
+                    cursor = sel_min + paste_text.len();
+                } else {
+                    text.insert_str(cursor, &paste_text);
+                    cursor += paste_text.len();
+                }
+                sel_start = cursor;
+                changed = true;
+                preferred_x = -1.0;
+            }
+
+            // ── Text input (typing) ──
+            if !self.input.text_input.is_empty() {
+                let typed = self.input.text_input.clone();
+                if has_selection {
+                    text.replace_range(sel_min..sel_max, &typed);
+                    cursor = sel_min + typed.len();
+                } else {
+                    text.insert_str(cursor, &typed);
+                    cursor += typed.len();
+                }
+                sel_start = cursor;
+                changed = true;
+                preferred_x = -1.0;
+            }
+
+            // ── Backspace ──
+            if self.input.key_backspace {
+                if has_selection {
+                    text.replace_range(sel_min..sel_max, "");
+                    cursor = sel_min;
+                    sel_start = sel_min;
+                    changed = true;
+                } else if cursor > 0 {
+                    let mut prev = cursor - 1;
+                    while prev > 0 && !text.is_char_boundary(prev) { prev -= 1; }
+                    text.replace_range(prev..cursor, "");
+                    cursor = prev;
+                    sel_start = prev;
+                    changed = true;
+                }
+                preferred_x = -1.0;
+            }
+
+            // ── Delete ──
+            if self.input.key_delete {
+                if has_selection {
+                    text.replace_range(sel_min..sel_max, "");
+                    cursor = sel_min;
+                    sel_start = sel_min;
+                    changed = true;
+                } else if cursor < text.len() {
+                    let mut next = cursor + 1;
+                    while next < text.len() && !text.is_char_boundary(next) { next += 1; }
+                    text.replace_range(cursor..next, "");
+                    changed = true;
+                }
+                preferred_x = -1.0;
+            }
+
+            // ── Enter (multiline only) ──
+            if self.input.key_enter {
+                if is_multiline {
+                    if has_selection {
+                        text.replace_range(sel_min..sel_max, "\n");
+                        cursor = sel_min + 1;
+                    } else {
+                        text.insert(cursor, '\n');
+                        cursor += 1;
+                    }
+                    sel_start = cursor;
+                    changed = true;
+                    preferred_x = -1.0;
+                } else {
+                    // Single-line: lose focus on Enter
+                    self.focus_id = 0;
+                }
+            }
+
+            // ── Escape: lose focus ──
+            if self.input.key_escape {
+                self.focus_id = 0;
+            }
+
+            // ── Click outside: lose focus ──
+            if self.input.mouse_pressed && !hovered {
+                self.focus_id = 0;
+            }
+        }
+
+        // Enforce 256 char limit
+        if text.len() > 256 {
+            text.truncate(256);
+            cursor = cursor.min(text.len());
+            sel_start = sel_start.min(text.len());
+        }
+
+        // ── Recompute wrapped lines after edits ──
+        let lines: Vec<(usize, usize)> = if is_multiline {
+            self.compute_wrapped_lines(text, render_font, content_w)
+        } else {
+            vec![(0, text.len())]
+        };
+
+        // ── Scroll follow cursor (multiline) ──
+        if is_multiline && editing {
+            let viewport_h = (input_rect.h - text_pad * 2.0).max(24.0);
+            let total_h = lines.len() as f32 * line_h;
+            let max_scroll = (total_h - viewport_h).max(0.0);
+
+            // Mouse wheel scrolling
+            if hovered && self.input.mouse_wheel_y.abs() > 0.001 {
+                scroll -= self.input.mouse_wheel_y * line_h * 3.0;
+            }
+
+            let cursor_line = find_line_for_offset(&lines, cursor);
+            let cursor_y_in_content = cursor_line as f32 * line_h;
+            // Scroll to keep cursor visible
+            if cursor_y_in_content < scroll {
+                scroll = cursor_y_in_content;
+            }
+            if cursor_y_in_content + line_h > scroll + viewport_h {
+                scroll = cursor_y_in_content + line_h - viewport_h;
+            }
+            scroll = scroll.clamp(0.0, max_scroll);
+        }
+
+        // ── Rendering ──
         if is_multiline {
-            // Multiline text area matching C++ internal_text_area_readonly:
-            let content_w = (input_rect.w - text_pad * 2.0 - 2.0).max(24.0);
             let viewport_h = (input_rect.h - text_pad * 2.0).max(24.0);
             let content_clip = Rect::new(
                 input_rect.x + text_pad, input_rect.y + text_pad,
                 content_w, viewport_h,
             );
-            let line_h = render_font + 5.0;
-
-            // First pass: compute line breaks (matching C++ character wrapping)
-            let lines = self.compute_wrapped_lines(text, render_font, content_w);
             let total_h = lines.len() as f32 * line_h;
             let max_scroll = (total_h - viewport_h).max(0.0);
 
             // Scrollbar
             let scrollbar_w = 8.0_f32;
-            let track = Rect::new(
+            let track_rect = Rect::new(
                 input_rect.x + input_rect.w - text_pad - scrollbar_w,
                 input_rect.y + text_pad,
                 scrollbar_w, viewport_h,
             );
             let thumb_h = if max_scroll > 0.0 {
-                (viewport_h * (viewport_h / (viewport_h + 1.0).max(total_h))).max(18.0)
+                (viewport_h * (viewport_h / total_h.max(viewport_h + 1.0))).max(18.0)
             } else {
                 viewport_h
             };
-            let thumb = Rect::new(track.x, track.y, track.w, thumb_h);
+            let thumb_y = if max_scroll > 0.0 {
+                track_rect.y + (scroll / max_scroll) * (viewport_h - thumb_h)
+            } else {
+                track_rect.y
+            };
             let secondary = self.theme.secondary;
             let panel = self.theme.panel;
             let primary = self.theme.primary;
-            self.paint_filled_rect(track, mix(secondary, panel, 0.45), 3.0);
-            self.paint_filled_rect(thumb, mix(primary, panel, 0.40), 3.0);
+            self.paint_filled_rect(track_rect, mix(secondary, panel, 0.45), 3.0);
+            self.paint_filled_rect(Rect::new(track_rect.x, thumb_y, track_rect.w, thumb_h), mix(primary, panel, 0.40), 3.0);
 
-            // Draw all text lines with clip (C++ emits all lines, clip_rect handles visibility)
-            let mut y = input_rect.y + text_pad;
-            for (start, len) in &lines {
-                if *len > 0 {
-                    let line_text = &text[*start..*start + *len];
+            // Selection highlight + text lines
+            let sel_min = cursor.min(sel_start);
+            let sel_max = cursor.max(sel_start);
+            let sel_color = rgba(self.theme.primary.r, self.theme.primary.g, self.theme.primary.b, 0.35);
+            let mut y = input_rect.y + text_pad - scroll;
+            for (line_start, line_len) in &lines {
+                let line_end = *line_start + *line_len;
+                // Draw selection highlight for this line
+                if editing && sel_min != sel_max && sel_min < line_end && sel_max > *line_start {
+                    let hl_start = sel_min.max(*line_start);
+                    let hl_end = sel_max.min(line_end);
+                    let x_start = self.measure_text(&text[*line_start..hl_start], render_font);
+                    let x_end = self.measure_text(&text[*line_start..hl_end], render_font);
+                    let hl_rect = Rect::new(
+                        content_clip.x + x_start, y,
+                        (x_end - x_start).max(0.0), line_h,
+                    );
+                    self.paint_filled_rect_clipped(hl_rect, sel_color, 0.0, Some(&content_clip));
+                }
+                // Draw text
+                if *line_len > 0 {
+                    let line_text = &text[*line_start..line_end];
                     self.paint_text_clipped(
                         Rect::new(content_clip.x, y, content_w, line_h),
                         line_text, render_font, text_col, TextAlign::Left, Some(&content_clip),
@@ -1594,8 +1930,22 @@ impl Context {
                 }
                 y += line_h;
             }
+
+            // Blinking caret
+            if editing {
+                let blink = (self.frame_index / 30) % 2 == 0;
+                if blink {
+                    let cursor_line = find_line_for_offset(&lines, cursor);
+                    let (ls, _) = lines[cursor_line];
+                    let caret_x = content_clip.x + self.measure_text(&text[ls..cursor], render_font);
+                    let caret_y = input_rect.y + text_pad - scroll + cursor_line as f32 * line_h;
+                    let caret_h = render_font + 2.0;
+                    let caret_rect = Rect::new(caret_x, caret_y, 1.5, caret_h);
+                    self.paint_filled_rect_clipped(caret_rect, text_col, 0.0, Some(&content_clip));
+                }
+            }
         } else {
-            // C++ draw_static_input_content: text rect = full input height, clip = y+2/h-4
+            // ── Single-line rendering ──
             let content_clip = Rect::new(
                 input_rect.x + text_pad,
                 input_rect.y + 2.0,
@@ -1612,9 +1962,49 @@ impl Context {
             } else {
                 text_col
             };
+
+            // Selection highlight
+            let sel_min = cursor.min(sel_start);
+            let sel_max = cursor.max(sel_start);
+            if editing && sel_min != sel_max && !text.is_empty() {
+                let sel_color = rgba(self.theme.primary.r, self.theme.primary.g, self.theme.primary.b, 0.35);
+                let x_start = self.measure_text(&text[..sel_min], render_font);
+                let x_end = self.measure_text(&text[..sel_max], render_font);
+                let hl_rect = Rect::new(
+                    content_clip.x + x_start,
+                    input_rect.y + 2.0,
+                    (x_end - x_start).max(0.0),
+                    input_rect.h - 4.0,
+                );
+                self.paint_filled_rect_clipped(hl_rect, sel_color, 0.0, Some(&content_clip));
+            }
+
             let text_w = self.measure_text(display_text, render_font);
             let text_rect = Rect::new(content_clip.x, input_rect.y, content_clip.w.max(text_w), input_rect.h);
             self.paint_text_clipped(text_rect, display_text, render_font, display_color, TextAlign::Left, Some(&content_clip));
+
+            // Blinking caret when editing
+            if editing {
+                let blink = (self.frame_index / 30) % 2 == 0;
+                if blink {
+                    let caret_x = content_clip.x + self.measure_text(&text[..cursor], render_font);
+                    let caret_h = render_font + 2.0;
+                    let caret_y = input_rect.y + (input_rect.h - caret_h) * 0.5;
+                    self.paint_filled_rect(
+                        Rect::new(caret_x, caret_y, 1.5, caret_h),
+                        text_col, 0.0,
+                    );
+                }
+            }
+        }
+
+        // ── Write back state ──
+        if let Some(ta_state) = self.text_area_states.get_mut(&id) {
+            ta_state.cursor = cursor;
+            ta_state.sel_start = sel_start;
+            ta_state.dragging = dragging;
+            ta_state.scroll = scroll;
+            ta_state.preferred_x = preferred_x;
         }
 
         changed
