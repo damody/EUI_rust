@@ -26,7 +26,14 @@ pub struct OpenGlRenderer {
     texture_uniform: glow::UniformLocation,
     texture_mode_uniform: glow::UniformLocation,
     font_atlas: Option<FontAtlas>,
+    icon_font_atlas: Option<FontAtlas>,
     image_cache: ImageCache,
+}
+
+/// Returns true if the codepoint is in the Unicode Private Use Area
+/// (used for icon fonts like Font Awesome).
+fn is_private_use_codepoint(cp: u32) -> bool {
+    cp >= 0xE000 && cp <= 0xF8FF
 }
 
 impl OpenGlRenderer {
@@ -49,6 +56,7 @@ impl OpenGlRenderer {
             texture_uniform,
             texture_mode_uniform,
             font_atlas: None,
+            icon_font_atlas: None,
             image_cache: ImageCache::new(),
         })
     }
@@ -58,6 +66,13 @@ impl OpenGlRenderer {
             atlas.destroy(&self.gl);
         }
         self.font_atlas = Some(FontAtlas::new(&self.gl, font, stb_to_fontdue_ratio));
+    }
+
+    pub unsafe fn set_icon_font(&mut self, font: fontdue::Font, stb_to_fontdue_ratio: f32) {
+        if let Some(ref atlas) = self.icon_font_atlas {
+            atlas.destroy(&self.gl);
+        }
+        self.icon_font_atlas = Some(FontAtlas::new(&self.gl, font, stb_to_fontdue_ratio));
     }
 
     unsafe fn flush_vertices(&self, vertices: &[Vertex], tex_mode: TextureMode, texture: Option<glow::Texture>) {
@@ -169,66 +184,104 @@ impl RendererBackend for OpenGlRenderer {
                         let end = start + cmd.text_length as usize;
                         if end <= draw_data.text_arena.len() {
                             let text = std::str::from_utf8(&draw_data.text_arena[start..end]).unwrap_or("");
-                            if !text.is_empty() {
-                                if let Some(ref mut font_atlas) = self.font_atlas {
-                                    let gl_ref = Rc::clone(&self.gl);
-                                    // Use corrected font_size so fontdue renders at the same
-                                    // visual scale as STB truetype measures.
-                                    let render_fs = font_atlas.render_font_size(cmd.font_size);
+                            if !text.is_empty() && self.font_atlas.is_some() {
+                                let gl_ref = Rc::clone(&self.gl);
+                                let has_icon_font = self.icon_font_atlas.is_some();
+                                let font_atlas = self.font_atlas.as_mut().unwrap();
+                                let render_fs = font_atlas.render_font_size(cmd.font_size);
+                                let icon_render_fs = if has_icon_font {
+                                    self.icon_font_atlas.as_ref().unwrap().render_font_size(cmd.font_size)
+                                } else {
+                                    render_fs
+                                };
 
-                                    // Two-pass approach matching C++ opengl_renderer_detail.inl:
-                                    // Pass 1: compute max_above, max_below, total_width from glyph metrics
-                                    let mut max_above: f32 = 0.0;
-                                    let mut max_below: f32 = 0.0;
-                                    let mut total_width: f32 = 0.0;
-                                    for ch in text.chars() {
-                                        let m = font_atlas.font.metrics(ch, render_fs);
-                                        // fontdue ymin: bottom of glyph relative to baseline (y-up)
-                                        // above baseline = ymin + height, below baseline = -ymin
-                                        let above = (m.ymin as f32 + m.height as f32).max(0.0);
-                                        let below = (-(m.ymin as f32)).max(0.0);
-                                        max_above = max_above.max(above);
-                                        max_below = max_below.max(below);
-                                        total_width += m.advance_width;
-                                    }
-                                    // Fallback to face metrics if glyph metrics insufficient (matching C++)
-                                    if max_above + max_below < 1.0 {
-                                        if let Some(lm) = font_atlas.font.horizontal_line_metrics(render_fs) {
-                                            max_above = lm.ascent;
-                                            max_below = -lm.descent;
-                                        } else {
-                                            max_above = render_fs * 0.72;
-                                            max_below = render_fs * 0.28;
-                                        }
-                                    }
+                                // Pass 1: compute metrics and rasterize all glyphs.
+                                // Collect per-glyph data to avoid holding mutable borrows during flush.
+                                struct GlyphInfo {
+                                    is_icon: bool,
+                                    advance: f32,
+                                    // Quad data (None if glyph has zero size)
+                                    quad: Option<(f32, f32, f32, f32, f32, f32, f32, f32)>,
+                                    // u0, v0, u1, v1
+                                }
+                                let mut max_above: f32 = 0.0;
+                                let mut max_below: f32 = 0.0;
+                                let mut total_width: f32 = 0.0;
+                                let mut glyph_infos: Vec<GlyphInfo> = Vec::new();
 
-                                    let text_h = (max_above + max_below).max(1.0);
-                                    let baseline_y = (cmd.rect.y + (cmd.rect.h - text_h).max(0.0) * 0.5 + max_above).round();
-
-                                    let start_x = match cmd.align {
-                                        TextAlign::Left => cmd.rect.x,
-                                        TextAlign::Center => cmd.rect.x + (cmd.rect.w - total_width) * 0.5,
-                                        TextAlign::Right => cmd.rect.x + cmd.rect.w - total_width,
+                                for ch in text.chars() {
+                                    let use_icon = has_icon_font && is_private_use_codepoint(ch as u32);
+                                    let entry = if use_icon {
+                                        let icon_atlas = self.icon_font_atlas.as_mut().unwrap();
+                                        icon_atlas.get_or_rasterize(&gl_ref, ch, icon_render_fs)
+                                    } else {
+                                        font_atlas.get_or_rasterize(&gl_ref, ch, render_fs)
                                     };
+                                    let above = (entry.offset_y + entry.height).max(0.0);
+                                    let below = (-entry.offset_y).max(0.0);
+                                    max_above = max_above.max(above);
+                                    max_below = max_below.max(below);
+                                    total_width += entry.advance_width;
+                                    let quad = if entry.width > 0.0 && entry.height > 0.0 {
+                                        Some((entry.offset_x, entry.offset_y, entry.width, entry.height,
+                                              entry.u0, entry.v0, entry.u1, entry.v1))
+                                    } else {
+                                        None
+                                    };
+                                    glyph_infos.push(GlyphInfo {
+                                        is_icon: use_icon,
+                                        advance: entry.advance_width,
+                                        quad,
+                                    });
+                                }
 
-                                    // Pass 2: render glyphs at baseline
-                                    let mut verts = Vec::new();
-                                    let mut pen_x = start_x;
-                                    for ch in text.chars() {
-                                        let entry = font_atlas.get_or_rasterize(&gl_ref, ch, render_fs);
-                                        if entry.width > 0.0 && entry.height > 0.0 {
-                                            let gx = (pen_x + entry.offset_x).round();
-                                            let gy = (baseline_y - entry.offset_y - entry.height).round();
-                                            push_textured_quad(
-                                                &mut verts,
-                                                gx, gy, entry.width, entry.height,
-                                                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
-                                                entry.u0, entry.v0, entry.u1, entry.v1,
-                                            );
-                                        }
-                                        pen_x += entry.advance_width;
+                                if max_above + max_below < 1.0 {
+                                    if let Some(lm) = font_atlas.font.horizontal_line_metrics(render_fs) {
+                                        max_above = lm.ascent;
+                                        max_below = -lm.descent;
+                                    } else {
+                                        max_above = render_fs * 0.72;
+                                        max_below = render_fs * 0.28;
                                     }
-                                    let tex = font_atlas.texture;
+                                }
+
+                                let text_h = (max_above + max_below).max(1.0);
+                                let baseline_y = (cmd.rect.y + (cmd.rect.h - text_h).max(0.0) * 0.5 + max_above).round();
+                                let start_x = match cmd.align {
+                                    TextAlign::Left => cmd.rect.x,
+                                    TextAlign::Center => cmd.rect.x + (cmd.rect.w - total_width) * 0.5,
+                                    TextAlign::Right => cmd.rect.x + cmd.rect.w - total_width,
+                                };
+
+                                // Pass 2: build vertex batches and flush.
+                                // No mutable atlas borrows needed — all glyphs already rasterized.
+                                let text_tex = font_atlas.texture;
+                                let icon_tex = self.icon_font_atlas.as_ref().map(|a| a.texture);
+
+                                let mut verts = Vec::new();
+                                let mut pen_x = start_x;
+                                let mut current_is_icon = false;
+                                for gi in &glyph_infos {
+                                    if !verts.is_empty() && gi.is_icon != current_is_icon {
+                                        let tex = if current_is_icon { icon_tex.unwrap() } else { text_tex };
+                                        self.flush_vertices(&verts, TextureMode::AlphaMask, Some(tex));
+                                        verts.clear();
+                                    }
+                                    current_is_icon = gi.is_icon;
+                                    if let Some((ox, oy, w, h, u0, v0, u1, v1)) = gi.quad {
+                                        let gx = (pen_x + ox).round();
+                                        let gy = (baseline_y - oy - h).round();
+                                        push_textured_quad(
+                                            &mut verts,
+                                            gx, gy, w, h,
+                                            cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
+                                            u0, v0, u1, v1,
+                                        );
+                                    }
+                                    pen_x += gi.advance;
+                                }
+                                if !verts.is_empty() {
+                                    let tex = if current_is_icon { icon_tex.unwrap() } else { text_tex };
                                     self.flush_vertices(&verts, TextureMode::AlphaMask, Some(tex));
                                 }
                             }
@@ -301,6 +354,9 @@ impl RendererBackend for OpenGlRenderer {
     fn release_resources(&mut self) {
         unsafe {
             if let Some(ref atlas) = self.font_atlas {
+                atlas.destroy(&self.gl);
+            }
+            if let Some(ref atlas) = self.icon_font_atlas {
                 atlas.destroy(&self.gl);
             }
             self.image_cache.destroy(&self.gl);

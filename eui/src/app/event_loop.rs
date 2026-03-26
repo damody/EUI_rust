@@ -158,6 +158,25 @@ impl ApplicationHandler for AppHandler {
                 ctx.set_text_measurer(measurer);
             }
         }
+
+        // Load icon font (Font Awesome) for PUA codepoint rendering.
+        // Icon font may be OTF (CFF-based) which stb_truetype can't parse,
+        // so we load it with fontdue only — no STB measurement needed for icons.
+        if self.options.enable_icon_font_fallback {
+            if let Some(icon_data) = load_icon_font(&self.options.icon_font_file) {
+                let settings = fontdue::FontSettings {
+                    collection_index: 0,
+                    scale: 40.0,
+                    load_substitutions: true,
+                };
+                if let Ok(icon_font) = fontdue::Font::from_bytes(&icon_data[..], settings) {
+                    // Icon font uses fontdue directly (ratio=0 means no STB correction).
+                    // Icon sizes are determined by the rect, not text metrics.
+                    unsafe { renderer.set_icon_font(icon_font, 0.0); }
+                }
+            }
+        }
+
         let input = InputState::default();
 
         self.state = Some(AppState {
@@ -381,5 +400,45 @@ fn load_system_default_font() -> Option<Vec<u8>> {
             return Some(data);
         }
     }
+    None
+}
+
+/// Resolve and load icon font file, trying multiple candidate paths
+/// matching C++ resolve_bundled_icon_font_file() behavior.
+fn load_icon_font(explicit_file: &Option<String>) -> Option<Vec<u8>> {
+    const BUNDLED_NAME: &str = "Font Awesome 7 Free-Solid-900.otf";
+
+    // Try explicit path first
+    if let Some(ref path) = explicit_file {
+        if let Ok(data) = std::fs::read(path) {
+            return Some(data);
+        }
+    }
+
+    // Try candidate locations (matching C++)
+    let candidates = [
+        format!("include/{BUNDLED_NAME}"),
+        format!("./include/{BUNDLED_NAME}"),
+        format!("../include/{BUNDLED_NAME}"),
+        format!("../../include/{BUNDLED_NAME}"),
+    ];
+    for path in &candidates {
+        if let Ok(data) = std::fs::read(path) {
+            return Some(data);
+        }
+    }
+
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for depth in &["", "..", "../..", "../../.."] {
+                let p = exe_dir.join(depth).join("include").join(BUNDLED_NAME);
+                if let Ok(data) = std::fs::read(&p) {
+                    return Some(data);
+                }
+            }
+        }
+    }
+
     None
 }

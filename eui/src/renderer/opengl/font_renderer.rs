@@ -25,14 +25,20 @@ pub struct FontAtlas {
     pub font: Font,
     /// Ratio to convert STB pixel_height to fontdue font_size:
     /// render_fs = round(cmd_fs * 1.20) * stb_to_fontdue_ratio
+    /// When 0.0, no STB correction is applied (icon fonts).
     pub stb_to_fontdue_ratio: f32,
 }
 
 impl FontAtlas {
-    /// Convert a DrawCommand font_size to the fontdue render font_size
-    /// that matches the STB measurement scale.
+    /// Convert a DrawCommand font_size to the fontdue render font_size.
+    /// For text fonts: matches the STB measurement scale.
+    /// For icon fonts (ratio=0): uses font_size directly.
     pub fn render_font_size(&self, cmd_font_size: f32) -> f32 {
-        (cmd_font_size * 1.20_f32).round() * self.stb_to_fontdue_ratio
+        if self.stb_to_fontdue_ratio > 0.0 {
+            (cmd_font_size * 1.20_f32).round() * self.stb_to_fontdue_ratio
+        } else {
+            cmd_font_size
+        }
     }
 
     pub unsafe fn new(gl: &glow::Context, font: Font, stb_to_fontdue_ratio: f32) -> Self {
