@@ -313,6 +313,9 @@ fn actor_glass_top(p: &GalleryPalette) -> u32 {
 fn actor_glass_bottom(p: &GalleryPalette) -> u32 {
     if p.light { mix_hex(0xEEF5FD, p.accent, 0.22) } else { mix_hex(0xD7EAFE, p.accent, 0.16) }
 }
+fn actor_inner_hex(p: &GalleryPalette) -> u32 {
+    if p.light { 0xFFFFFF } else { 0xEFF6FF }
+}
 fn actor_stroke(p: &GalleryPalette) -> u32 {
     if p.light { mix_hex(0xD7E6F7, p.accent, 0.18) } else { mix_hex(0xDBECFF, p.accent, 0.16) }
 }
@@ -368,6 +371,18 @@ fn draw_shadow(ctx: &mut Context, r: Rect, radius: f32, offset_y: f32, blur: f32
         color: GfxColor::from(color_from_hex(hex, 1.0)),
     };
     eui::quick::primitive_painter::paint_shadow_approx(ctx, &r, radius, &shadow, alpha);
+}
+
+/// Card/surface shadow matching C++ SurfaceBuilder paint_shadow (different formula from paint_shadow_approx)
+fn draw_shadow_card(ctx: &mut Context, r: Rect, radius: f32, offset_y: f32, blur: f32, hex: u32, alpha: f32) {
+    let shadow = Shadow {
+        offset_x: 0.0,
+        offset_y,
+        blur_radius: blur,
+        spread: 0.0,
+        color: GfxColor::from(color_from_hex(hex, 1.0)),
+    };
+    eui::quick::primitive_painter::paint_shadow(ctx, &r, radius, &shadow, alpha);
 }
 
 fn draw_fill(ctx: &mut Context, r: Rect, hex: u32, radius: f32, alpha: f32) {
@@ -455,16 +470,23 @@ fn draw_actor(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u3
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_actor_ex(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u32, bottom: u32, alpha: f32, blur_radius: f32, fill_alpha: f32) {
-    // Shadow matching C++
+fn draw_actor_ex(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, top: u32, bottom: u32, alpha: f32, blur_radius: f32, backdrop_blur: f32, fill_alpha: f32) {
+    // Outer shape: shadow + backdrop blur + gradient + stroke
     draw_shadow(ctx, rect, 18.0 * s, 8.0 * s, 20.0 * s, panel_shadow_hex(p), if p.light { 0.08 } else { 0.12 });
-    // When blur > 0, draw a backdrop blur effect behind the actor
-    if blur_radius > 0.0 {
-        ctx.paint_backdrop_blur(rect, blur_radius, 18.0 * s);
+    if blur_radius > 0.0 || backdrop_blur > 0.0 {
+        ctx.paint_backdrop_blur(rect, backdrop_blur, 18.0 * s);
     }
-    // Gradient fill matching C++
     draw_gradient(ctx, rect, top, bottom, 18.0 * s, fill_alpha);
     draw_stroke(ctx, rect, actor_stroke(p), 18.0 * s, 1.0, 0.92 * alpha);
+
+    // Inner shape matching C++: inset(10*s), radius=10*s, fill=actor_inner_hex
+    let inner_rect = inset_rect(&rect, 10.0 * s, 10.0 * s);
+    let inner_alpha = (if p.light { 0.32 } else { 0.18 }) * fill_alpha;
+    let inner_hex = actor_inner_hex(p);
+    if blur_radius > 0.0 || backdrop_blur > 0.0 {
+        ctx.paint_backdrop_blur(inner_rect, backdrop_blur * 0.35, 10.0 * s);
+    }
+    draw_fill(ctx, inner_rect, inner_hex, 10.0 * s, inner_alpha);
 }
 
 fn draw_actor_default(ctx: &mut Context, rect: Rect, s: f32, p: &GalleryPalette, alpha: f32) {
@@ -605,8 +627,8 @@ fn draw_blur_demo(ctx: &mut Context, rect: Rect, s: f32, time: f64, p: &GalleryP
     let right_actor = Rect::new(rect.x + rect.w * 0.5 + 26.0 * s, rect.y + rect.h * 0.5 - 58.0 * s, 188.0 * s, 116.0 * s);
     draw_text_center(ctx, "No blur", Rect::new(left_actor.x, left_actor.y - 34.0 * s, left_actor.w, 18.0 * s), font_body(s), p.muted, 0.96);
     draw_text_center(ctx, "Animated blur", Rect::new(right_actor.x, right_actor.y - 34.0 * s, right_actor.w, 18.0 * s), font_body(s), p.muted, 0.96);
-    draw_actor_ex(ctx, left_actor, s, p, actor_glass_top(p), actor_glass_bottom(p), 1.0, 0.0, 0.12);
-    draw_actor_ex(ctx, right_actor, s, p, actor_glass_top(p), actor_glass_bottom(p), 1.0, blur_value, 0.12);
+    draw_actor_ex(ctx, left_actor, s, p, actor_glass_top(p), actor_glass_bottom(p), 1.0, 0.0, 0.0, 0.12);
+    draw_actor_ex(ctx, right_actor, s, p, actor_glass_top(p), actor_glass_bottom(p), 1.0, blur_value, blur_value, 0.12);
 }
 
 fn draw_combo_demo(ctx: &mut Context, rect: Rect, s: f32, time: f64, p: &GalleryPalette) {
@@ -629,7 +651,7 @@ fn draw_combo_demo(ctx: &mut Context, rect: Rect, s: f32, time: f64, p: &Gallery
     let h = 116.0 * s * actor_scale;
     let cx = rect.x + rect.w * 0.5 + dx;
     let cy = rect.y + rect.h * 0.5;
-    draw_actor_ex(ctx, Rect::new(cx - w * 0.5, cy - h * 0.5, w, h), s, p, top, bottom, alpha, blur_value, 0.24);
+    draw_actor_ex(ctx, Rect::new(cx - w * 0.5, cy - h * 0.5, w, h), s, p, top, bottom, alpha, blur_value, blur_value, 0.24);
 }
 
 fn draw_demo_scene(ctx: &mut Context, demo: usize, rect: Rect, s: f32, time: f64, p: &GalleryPalette) {
@@ -1355,27 +1377,27 @@ fn draw_settings_page(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s
                 }
             }
 
-            // RGB sliders
+            // RGB sliders (decimals=0 matching C++)
             if rows.len() > 6 {
-                if ctx.slider_labeled(hash_str("red_slider"), rows[6], "Red", &mut state.custom_accent_r, 0.0, 255.0) {
+                if ctx.slider_labeled_ex(hash_str("red_slider"), rows[6], "Red", &mut state.custom_accent_r, 0.0, 255.0, 0) {
                     state.accent_index = custom_accent_slot();
                 }
             }
             if rows.len() > 7 {
-                if ctx.slider_labeled(hash_str("green_slider"), rows[7], "Green", &mut state.custom_accent_g, 0.0, 255.0) {
+                if ctx.slider_labeled_ex(hash_str("green_slider"), rows[7], "Green", &mut state.custom_accent_g, 0.0, 255.0, 0) {
                     state.accent_index = custom_accent_slot();
                 }
             }
             if rows.len() > 8 {
-                if ctx.slider_labeled(hash_str("blue_slider"), rows[8], "Blue", &mut state.custom_accent_b, 0.0, 255.0) {
+                if ctx.slider_labeled_ex(hash_str("blue_slider"), rows[8], "Blue", &mut state.custom_accent_b, 0.0, 255.0, 0) {
                     state.accent_index = custom_accent_slot();
                 }
             }
             if rows.len() > 9 {
-                ctx.slider_labeled(hash_str("corner_radius"), rows[9], "Corner Radius", &mut state.layout_radius, 8.0, 28.0);
+                ctx.slider_labeled_ex(hash_str("corner_radius"), rows[9], "Corner Radius", &mut state.layout_radius, 8.0, 28.0, 0);
             }
             if rows.len() > 10 {
-                ctx.slider_labeled(hash_str("glass_blur"), rows[10], "Glass Blur", &mut state.settings_blur, 0.0, 28.0);
+                ctx.slider_labeled_ex(hash_str("glass_blur"), rows[10], "Glass Blur", &mut state.settings_blur, 0.0, 28.0, 0);
             }
         });
     }
@@ -1385,14 +1407,18 @@ fn draw_settings_page(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s
         draw_card(ctx, cols[1], "Live Preview", s, &p, |ctx, content| {
             let preview_radius = state.layout_radius * s;
             let preview = inset_rect(&content, 6.0 * s, 6.0 * s);
+            // Clip to preview area matching C++ ui.clip(preview, ...)
+            ctx.push_clip(preview);
             draw_fill(ctx, preview, preview_backdrop(&p), preview_radius, 1.0);
             draw_stroke(ctx, preview, accent_hex(state), preview_radius, 1.0, 0.76);
             let inner = inset_rect(&preview, 18.0 * s, 18.0 * s);
             let palette = make_gallery_palette(state);
             draw_stage_background(ctx, inner, s, &palette);
             draw_blur_reference(ctx, inset_rect(&inner, 34.0 * s, 34.0 * s), s * 0.82, &p);
+            let blur = state.settings_blur * s;
             draw_actor_ex(ctx, Rect::new(inner.x + inner.w * 0.5 - 80.0 * s, inner.y + inner.h * 0.5 - 50.0 * s, 160.0 * s, 100.0 * s),
-                s, &p, actor_glass_top(&p), actor_glass_bottom(&p), 1.0, state.settings_blur * s, 0.12);
+                s, &p, actor_glass_top(&p), actor_glass_bottom(&p), 1.0, blur, blur, 0.18);
+            ctx.pop_clip();
         });
     }
 }
@@ -1654,7 +1680,7 @@ fn draw_stage(ctx: &mut Context, state: &mut GalleryState, rect: Rect, s: f32, t
 fn draw_card(ctx: &mut Context, rect: Rect, title: &str, s: f32, p: &GalleryPalette, body: impl FnOnce(&mut Context, Rect)) {
     // Card radius/padding/shadow matching C++ SurfaceBuilder(card): radius=22*s, padding=16 (unscaled), shadow(0,10,18)
     let card_radius = 22.0 * s;
-    draw_shadow(ctx, rect, card_radius, 10.0, 18.0, 0x020617, 0.12);
+    draw_shadow_card(ctx, rect, card_radius, 10.0, 18.0, 0x020617, 0.12);
     draw_fill(ctx, rect, p.surface_alt, card_radius, 1.0);
     draw_stroke(ctx, rect, p.border, card_radius, 1.0, 1.0);
     // C++ SurfaceBuilder does NOT push_clip for cards
@@ -1740,8 +1766,8 @@ fn main() {
         let margin = 18.0 * s;
         let frame_rect = Rect::new(margin, margin, (vw - margin * 2.0).max(0.0), (vh - margin * 2.0).max(0.0));
 
-        // Shell background with shadow + gradient matching C++
-        draw_shadow(ctx, frame_rect, 30.0 * s, 14.0 * s, 28.0 * s, panel_shadow_hex(&p), if p.light { 0.10 } else { 0.18 });
+        // Shell background with shadow + gradient matching C++ SurfaceBuilder(panel)
+        draw_shadow_card(ctx, frame_rect, 30.0 * s, 14.0 * s, 28.0 * s, panel_shadow_hex(&p), if p.light { 0.10 } else { 0.18 });
         draw_gradient(ctx, frame_rect, p.shell_top, p.shell_bottom, 30.0 * s, 1.0);
         draw_stroke(ctx, frame_rect, p.border, 30.0 * s, 1.0, 1.0);
 
