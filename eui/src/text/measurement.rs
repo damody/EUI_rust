@@ -1,8 +1,9 @@
 use fontdue::Font;
+use stb_truetype::FontInfo;
 
 pub struct TextMeasurer {
     font: Font,
-    stb_correction: f32,
+    stb_font: FontInfo<Vec<u8>>,
 }
 
 impl TextMeasurer {
@@ -13,28 +14,57 @@ impl TextMeasurer {
             load_substitutions: true,
         };
         let font = Font::from_bytes(font_data, settings).ok()?;
-        let stb_correction = compute_stb_correction(&font);
-        Some(Self { font, stb_correction })
+
+        let offset = stb_truetype::get_font_offset_for_index(font_data, 0)?;
+        let stb_font = FontInfo::new(font_data.to_vec(), offset as usize)?;
+
+        Some(Self { font, stb_font })
     }
 
-    pub fn from_font(font: Font) -> Self {
-        let stb_correction = compute_stb_correction(&font);
-        Self { font, stb_correction }
+    pub fn from_font_with_data(font: Font, font_data: &[u8]) -> Option<Self> {
+        let offset = stb_truetype::get_font_offset_for_index(font_data, 0)?;
+        let stb_font = FontInfo::new(font_data.to_vec(), offset as usize)?;
+        Some(Self { font, stb_font })
     }
 
-    /// Measure character advance matching C++ STB Truetype scaling.
-    /// C++ measures at round(font_size * 1.20) then uses STB's
-    /// scale = size / (ascent - descent) instead of fontdue's size / units_per_em.
+    /// Measure character advance matching C++ STB Truetype:
+    /// px = round(font_size * 1.20)
+    /// scale = stbtt_ScaleForPixelHeight(px)
+    /// advance = stbtt_GetGlyphHMetrics(glyph).advance_width * scale
     pub fn measure_char_advance(&self, ch: char, font_size: f32) -> f32 {
-        let px = (font_size * 1.20).round();
-        self.font.metrics(ch, px).advance_width * self.stb_correction
+        let px = (font_size * 1.20_f32).round();
+        let scale = self.stb_font.scale_for_pixel_height(px);
+        let cp = ch as u32;
+        let glyph = self.stb_font.find_glyph_index(cp);
+        let glyph = if glyph == 0 && cp != 0 {
+            self.stb_font.find_glyph_index('?' as u32)
+        } else {
+            glyph
+        };
+        if glyph == 0 {
+            return 0.0;
+        }
+        let hm = self.stb_font.get_glyph_h_metrics(glyph);
+        (hm.advance_width as f32 * scale).max(0.0)
     }
 
     pub fn measure_width(&self, text: &str, font_size: f32) -> f32 {
-        let px = (font_size * 1.20).round();
+        let px = (font_size * 1.20_f32).round();
+        let scale = self.stb_font.scale_for_pixel_height(px);
         let mut width = 0.0;
         for ch in text.chars() {
-            width += self.font.metrics(ch, px).advance_width * self.stb_correction;
+            let cp = ch as u32;
+            let glyph = self.stb_font.find_glyph_index(cp);
+            let glyph = if glyph == 0 && cp != 0 {
+                self.stb_font.find_glyph_index('?' as u32)
+            } else {
+                glyph
+            };
+            if glyph == 0 {
+                continue;
+            }
+            let hm = self.stb_font.get_glyph_h_metrics(glyph);
+            width += (hm.advance_width as f32 * scale).max(0.0);
         }
         width
     }
@@ -55,18 +85,4 @@ impl TextMeasurer {
     pub fn rasterize(&self, ch: char, font_size: f32) -> (fontdue::Metrics, Vec<u8>) {
         self.font.rasterize(ch, font_size)
     }
-}
-
-/// Compute STB correction factor: stb_truetype scales advance by
-/// size / (ascent - descent), while fontdue scales by size / units_per_em.
-/// The ratio = units_per_em / (ascent - descent).
-fn compute_stb_correction(font: &Font) -> f32 {
-    let metrics = font.horizontal_line_metrics(1.0);
-    if let Some(m) = metrics {
-        let ascent_descent = m.ascent - m.descent;
-        if ascent_descent > 0.0001 {
-            return 1.0 / ascent_descent;
-        }
-    }
-    1.0
 }

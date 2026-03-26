@@ -13,6 +13,7 @@ fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 raw-window-handle = "0.6"
 arboard = "3"
+stb_truetype = "0.3"
 
 [[example]]
 name = "minimal_quick_demo"
