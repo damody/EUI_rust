@@ -1165,14 +1165,23 @@ impl Context {
 
     #[allow(clippy::too_many_lines)]
     pub fn slider(&mut self, id: u64, rect: Rect, value: &mut f32, min: f32, max: f32) -> bool {
-        self.slider_labeled(id, rect, "", value, min, max)
+        self.slider_labeled_ex(id, rect, "", value, min, max, -1)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn slider_labeled(&mut self, id: u64, rect: Rect, label: &str, value: &mut f32, min: f32, max: f32) -> bool {
+        self.slider_labeled_ex(id, rect, label, value, min, max, -1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_labeled_ex(&mut self, id: u64, rect: Rect, label: &str, value: &mut f32, min: f32, max: f32, decimals: i32) -> bool {
         let min_value = min.min(max);
         let max_value = min.max(max);
         let radius = self.theme.radius;
+
+        // Cap height at 40px matching C++ SliderBuilder height_=40.0f (no centering, matches next_rect behavior)
+        let effective_h = rect.h.min(40.0);
+        let rect = Rect::new(rect.x, rect.y, rect.w, effective_h);
 
         // Font sizing
         let label_font = (rect.h * 0.36).clamp(13.0, 24.0);
@@ -1300,8 +1309,14 @@ impl Context {
             (radius - 2.0).max(0.0), 1.0,
         );
 
-        // Value text (non-editing mode)
-        let value_text = format!("{:.2}", *value);
+        // Value text (non-editing mode) — resolve decimals matching C++
+        let value_decimals = if decimals >= 0 {
+            (decimals as usize).min(4)
+        } else {
+            let span = (max_value - min_value).abs();
+            if span <= 1.0 { 2 } else if span <= 10.0 { 1 } else { 0 }
+        };
+        let value_text = format!("{:.prec$}", *value, prec = value_decimals);
         self.paint_text(
             Rect::new(value_box.x + value_padding, value_box.y,
                        value_box.w - value_padding * 2.0, value_box.h),
