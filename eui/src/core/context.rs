@@ -385,8 +385,7 @@ impl Context {
             let (cp, next) = decode_utf8_at(bytes, index);
             let advance = if let Some(ref measurer) = self.text_measurer {
                 let ch_char = char::from_u32(cp).unwrap_or('\u{FFFD}');
-                let metrics = measurer.font().metrics(ch_char, font_size);
-                metrics.advance_width
+                measurer.measure_char_advance(ch_char, font_size)
             } else {
                 font_size * 0.5
             };
