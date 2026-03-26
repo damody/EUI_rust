@@ -225,8 +225,8 @@ impl ApplicationHandler for AppHandler {
                 state.renderer.render(&draw_data, &metrics);
                 state.renderer.end_frame();
 
-                // Dump commands to JSON if P was pressed
-                if state.pending_dump_json {
+                // Dump commands to JSON if P was pressed or first frame
+                if state.pending_dump_json || state.frame_index == 0 {
                     state.pending_dump_json = false;
                     let path = std::path::Path::new("eui_dump_rust.json");
                     crate::core::debug_dump::dump_commands_json(
