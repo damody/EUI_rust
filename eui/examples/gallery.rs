@@ -1409,10 +1409,9 @@ fn draw_image_page(ctx: &mut Context, state: &GalleryState, rect: Rect, s: f32) 
             .items(&[fr(1.2), px(320.0 * s)]).resolve();
 
         if let Some(preview) = top_cols.first() {
+            let hero_path = gallery_preview_path("0.jpg");
             draw_card(ctx, *preview, "ui.image(...)", s, &p, |ctx, content| {
-                // Placeholder for image - show colored rect
-                draw_fill(ctx, content, mix_hex(p.surface_deep, p.accent, 0.15), 18.0 * s, 0.94);
-                draw_text_center(ctx, "Image Preview", Rect::new(content.x, content.y + content.h * 0.5 - 10.0, content.w, 20.0), font_heading(s), p.text, 0.7);
+                ctx.paint_image_rect(content, &hero_path, ImageFit::Cover, 18.0 * s);
                 // Cover chip
                 let chip = Rect::new(content.x + content.w - 140.0 * s, content.y + 16.0 * s, 124.0 * s, 28.0 * s);
                 draw_fill(ctx, chip, mix_hex(p.surface_deep, p.accent, 0.24), chip.h * 0.5, 0.94);
@@ -1440,14 +1439,22 @@ fn draw_image_page(ctx: &mut Context, state: &GalleryState, rect: Rect, s: f32) 
         let mode_cols = LinearLayout::row(rows[1]).gap(12.0 * s)
             .items(&[fr(1.0), fr(1.0), fr(1.0), fr(1.0)]).resolve();
         let modes = ["Cover", "Contain", "Stretch", "Center"];
+        let fits = [ImageFit::Cover, ImageFit::Contain, ImageFit::Stretch, ImageFit::Center];
+        let files = ["1.jpg", "2.jpg", "3.jpg", "4.jpg"];
+        let paths: Vec<String> = files.iter().map(|f| gallery_preview_path(f)).collect();
         for (i, col) in mode_cols.iter().enumerate() {
+            let path = &paths[i];
+            let fit = fits[i];
+            let surface_deep = p.surface_deep;
+            let border_soft = p.border_soft;
+            let muted = p.muted;
             draw_card(ctx, *col, modes[i], s, &p, |ctx, content| {
                 let stage = Rect::new(content.x, content.y, content.w, (content.h - 22.0 * s).max(0.0));
-                draw_fill(ctx, stage, mix_hex(p.surface_deep, p.accent, 0.08 + 0.04 * i as f32), 16.0 * s, 0.96);
-                draw_stroke(ctx, stage, p.border_soft, 16.0 * s, 1.0, 0.88);
-                draw_text_center(ctx, modes[i], Rect::new(stage.x, stage.y + stage.h * 0.5 - 10.0, stage.w, 20.0), font_heading(s), p.text, 0.5);
+                draw_fill(ctx, stage, surface_deep, 16.0 * s, 0.96);
+                ctx.paint_image_rect(stage, path, fit, 16.0 * s);
+                draw_stroke(ctx, stage, border_soft, 16.0 * s, 1.0, 0.88);
                 let footer = Rect::new(content.x, content.y + content.h - 18.0 * s, content.w, 18.0 * s);
-                draw_text_center(ctx, modes[i], footer, font_meta(s), p.muted, 0.96);
+                draw_text_center(ctx, modes[i], footer, font_meta(s), muted, 0.96);
             });
         }
     }
@@ -1476,11 +1483,11 @@ fn draw_about_page(ctx: &mut Context, state: &GalleryState, rect: Rect, s: f32) 
             let inner = inset_rect(&hero, 20.0 * s, 20.0 * s);
             let avatar_size = 72.0 * s;
 
-            // Avatar placeholder
+            // Avatar image
             let avatar = Rect::new(inner.x + (inner.w - avatar_size) * 0.5, inner.y, avatar_size, avatar_size);
-            draw_fill(ctx, avatar, mix_hex(p.accent, 0xFFFFFF, 0.3), avatar_size * 0.5, 0.98);
+            let avatar_path = gallery_preview_path("5.jpg");
+            ctx.paint_image_rect(avatar, &avatar_path, ImageFit::Cover, avatar_size * 0.5);
             draw_stroke(ctx, avatar, mix_hex(accent, 0xFFFFFF, if p.light { 0.22 } else { 0.10 }), avatar_size * 0.5, 2.0, 0.96);
-            draw_text_center(ctx, "E", avatar, font_display(s) * 1.5, p.text, 0.8);
 
             let title_y = inner.y + avatar_size + 8.0 * s;
             draw_text_center(ctx, "EUI", Rect::new(inner.x, title_y, inner.w, 28.0 * s), font_heading(s) * 2.0, mix_hex(p.text, accent, 0.24), 0.98);
@@ -1673,6 +1680,25 @@ fn draw_readonly(ctx: &mut Context, rect: Rect, label: &str, value: &str, _s: f3
     // Use the proper input_readonly widget matching C++ internal_input_readonly
     let id = hash_str(label) ^ hash_str(value);
     ctx.input_readonly(id, rect, label, value);
+}
+
+// ── Asset path helper ──
+
+fn gallery_preview_path(filename: &str) -> String {
+    // Search upward from exe for "preview/" directory, matching C++ gallery_asset_path
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..6 {
+            if let Some(ref d) = dir {
+                let candidate = d.join("preview").join(filename);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+                dir = d.parent().map(|p| p.to_path_buf());
+            }
+        }
+    }
+    format!("preview/{}", filename)
 }
 
 // ── Hash helper ──
