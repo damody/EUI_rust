@@ -80,6 +80,9 @@ pub struct Context {
     pub(crate) input: InputState,
     pub(crate) theme: Theme,
     pub(crate) frame_index: u64,
+    pub(crate) prev_time_seconds: f64,
+    pub(crate) has_prev_time: bool,
+    pub(crate) ui_dt: f32,
 
     // Viewport
     pub(crate) viewport_w: f32,
@@ -124,6 +127,9 @@ impl Context {
             input: InputState::default(),
             theme: Theme::default(),
             frame_index: 0,
+            prev_time_seconds: 0.0,
+            has_prev_time: false,
+            ui_dt: 1.0 / 60.0,
             viewport_w: 800.0,
             viewport_h: 600.0,
             dpi_scale: 1.0,
@@ -147,6 +153,15 @@ impl Context {
         self.viewport_w = viewport_w;
         self.viewport_h = viewport_h;
         self.dpi_scale = dpi_scale;
+        // Compute frame delta time matching C++ ui_dt_ = clamp(dt, 1/240, 0.10)
+        if self.has_prev_time {
+            let dt = input.time_seconds - self.prev_time_seconds;
+            self.ui_dt = (dt as f32).clamp(1.0 / 240.0, 0.10);
+        } else {
+            self.ui_dt = 1.0 / 60.0;
+            self.has_prev_time = true;
+        }
+        self.prev_time_seconds = input.time_seconds;
         self.input = input;
         self.frame_index += 1;
 
@@ -856,7 +871,7 @@ impl Context {
     }
 
     pub fn presence(&mut self, id: u64, visible: bool) -> f32 {
-        let dt = (self.input.time_seconds as f32).max(0.001);
+        let dt = self.ui_dt;
         let speed = 6.0;
         let state = self.motion_states.entry(id).or_default();
         state.last_touched_frame = self.frame_index;
@@ -871,7 +886,7 @@ impl Context {
     }
 
     pub fn animated_value(&mut self, id: u64, target: f32) -> f32 {
-        let dt = (self.input.time_seconds as f32).max(0.001);
+        let dt = self.ui_dt;
         let state = self.motion_states.entry(id).or_default();
         state.last_touched_frame = self.frame_index;
 
@@ -887,7 +902,7 @@ impl Context {
 
     /// Full motion state with focus and active channels, matching C++ update_motion_state.
     pub fn motion_ex(&mut self, id: u64, hovered: bool, pressed: bool, focused: bool, active: bool) -> MotionResultEx {
-        let dt = (self.input.time_seconds as f32).max(0.001);
+        let dt = self.ui_dt;
         let state = self.motion_states.entry(id).or_default();
         state.last_touched_frame = self.frame_index;
 
@@ -1831,8 +1846,8 @@ impl Context {
             }
         }
 
-        // Enforce 256 char limit
-        if text.len() > 256 {
+        // Enforce 256 char limit (single-line only, matching C++)
+        if !is_multiline && text.len() > 256 {
             text.truncate(256);
             cursor = cursor.min(text.len());
             sel_start = sel_start.min(text.len());
