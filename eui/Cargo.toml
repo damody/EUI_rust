@@ -30,3 +30,7 @@ path = "examples/anchor_demo.rs"
 [[example]]
 name = "dashboard_demo"
 path = "examples/dashboard_demo.rs"
+
+[[example]]
+name = "reference_dashboard_demo"
+path = "examples/reference_dashboard_demo.rs"
