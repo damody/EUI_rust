@@ -1744,6 +1744,146 @@ impl Context {
         changed
     }
 
+    /// Expanding dropdown with selectable items, matching C++ `internal_begin_dropdown`.
+    /// Returns true when the selection changes.
+    /// `label`: header text (e.g. "Density: Compact")
+    /// `open`: mutable open/close state
+    /// `items`: list of selectable item labels
+    /// `selected`: current selection index
+    /// `body_height`: height of expanded body
+    /// `padding`: internal padding
+    pub fn dropdown_select(
+        &mut self, id: u64, rect: Rect, label: &str, open: &mut bool,
+        items: &[&str], selected: &mut usize, body_height: f32, padding: f32,
+    ) -> bool {
+        let body_height = body_height.max(36.0);
+        let padding = padding.clamp(4.0, 24.0);
+        let header_h = 34.0_f32.max(padding * 3.0);
+        let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
+
+        // Dynamic sizing matching C++
+        let header_font = (header_h * 0.38).clamp(13.0, 24.0);
+        let header_pad = (header_h * 0.28).clamp(10.0, 22.0);
+        let indicator_size = (header_h * 0.34).clamp(10.0, 18.0);
+
+        // Reveal animation (0 = closed, 1 = open)
+        let reveal_id = context_hash_mix(id, 0x1a2b3c4d5e6f7013);
+        let reveal = self.presence(reveal_id, *open);
+        let reveal_alpha = 1.0 - (1.0 - reveal) * (1.0 - reveal); // ease-out
+
+        // Header hover / click
+        let header_hovered = self.is_hovered(&header_rect);
+        let header_held = header_hovered && self.is_mouse_down();
+        if header_hovered && self.input.mouse_pressed {
+            *open = !*open;
+        }
+
+        // 4-channel motion for header
+        let m = self.motion_ex(id, header_hovered, header_held, false, *open);
+        let hover_v = Self::snap_visual_motion(m.hover, 1.0 / 48.0);
+        let active_v = Self::snap_visual_motion(m.active, 1.0 / 40.0);
+
+        // Header chrome
+        let panel = self.theme.panel;
+        let secondary_hover = self.theme.secondary_hover;
+        let primary = self.theme.primary;
+        let radius = self.theme.radius;
+        let fill = mix(panel, secondary_hover, hover_v * 0.32 + active_v * 0.08);
+        self.paint_soft_glow(header_rect, primary, radius, active_v * 0.26 + hover_v * 0.10, 5.0);
+        self.paint_filled_rect(header_rect, fill, radius);
+        let outline_color = mix(self.theme.outline, self.theme.focus_ring,
+                                 hover_v * 0.20 + active_v * 0.18);
+        self.paint_outline_rect(header_rect, outline_color, radius, 1.0 + hover_v * 0.10);
+
+        // Header label
+        let text_rect = Rect::new(
+            header_rect.x + header_pad, header_rect.y,
+            header_rect.w - header_pad * 2.0 - indicator_size - 6.0, header_rect.h,
+        );
+        let text_col = self.theme.text;
+        self.paint_text(text_rect, label, header_font, text_col, TextAlign::Left);
+
+        // Chevron: rotates from 0 (closed) to π/2 (open) matching C++
+        let chevron_rect = Rect::new(
+            header_rect.x + header_rect.w - header_pad - indicator_size,
+            header_rect.y + (header_rect.h - indicator_size) * 0.5,
+            indicator_size, indicator_size,
+        );
+        let chevron_color = mix(self.theme.muted_text, self.theme.text,
+                                 active_v * 0.20 + hover_v * 0.10);
+        let chevron_rotation = reveal * std::f32::consts::FRAC_PI_2;
+        let chevron_thickness = (header_h * 0.065).clamp(1.4, 2.4);
+        self.paint_chevron_ex(chevron_rect, chevron_color, chevron_rotation, chevron_thickness);
+
+        // Body (only when animating or open)
+        let mut changed = false;
+        if reveal > 0.01 {
+            let body_alpha = (0.16 + reveal_alpha * 0.84).clamp(0.0, 1.0);
+            let content_alpha = (0.08 + reveal_alpha * 0.92).clamp(0.0, 1.0);
+            let shell_offset_y = (1.0 - reveal) * 8.0;
+            let content_offset_y = (1.0 - reveal) * 10.0;
+
+            let body_rect = Rect::new(
+                rect.x, header_rect.y + header_h + shell_offset_y,
+                rect.w, body_height,
+            );
+
+            // Body shell
+            let body_fill = mix(panel, self.theme.secondary_hover, 0.35);
+            let body_fill_a = Color::new(body_fill.r, body_fill.g, body_fill.b, body_fill.a * body_alpha);
+            self.paint_soft_glow(body_rect, primary, radius, (active_v * 0.10 + reveal_alpha * 0.14) * body_alpha, 6.0);
+            self.paint_filled_rect(body_rect, body_fill_a, radius);
+            let body_outline = mix(self.theme.outline, self.theme.focus_ring, active_v * 0.16);
+            let outline_a = (0.18 + reveal_alpha * 0.82).clamp(0.0, 1.0) * body_alpha;
+            let body_outline_a = Color::new(body_outline.r, body_outline.g, body_outline.b, body_outline.a * outline_a);
+            self.paint_outline_rect(body_rect, body_outline_a, radius, 1.0 + active_v * 0.12);
+
+            // Items
+            let item_h = ((body_height - padding * 2.0) / items.len().max(1) as f32).max(20.0);
+            let item_font = (item_h * 0.48).clamp(12.0, 22.0);
+            let item_x = body_rect.x + padding;
+            let item_w = body_rect.w - padding * 2.0;
+            let mut item_y = body_rect.y + padding + content_offset_y;
+
+            for (i, item_label) in items.iter().enumerate() {
+                let item_rect = Rect::new(item_x, item_y, item_w, item_h);
+                let is_selected = i == *selected;
+                let item_hovered = self.is_hovered(&item_rect) && *open;
+                let item_id = context_hash_mix(id, 0x1a2b3c4d5e6f8000 + i as u64);
+                let im = self.motion(item_id, item_hovered, item_hovered && self.is_mouse_down());
+
+                // Item hover highlight
+                if im.hover > 0.01 {
+                    let hover_fill = mix(self.theme.panel, self.theme.secondary_hover, im.hover * 0.5);
+                    let hover_fill_a = Color::new(hover_fill.r, hover_fill.g, hover_fill.b, hover_fill.a * content_alpha);
+                    self.paint_filled_rect(item_rect, hover_fill_a, radius * 0.5);
+                }
+
+                // Item text
+                let item_text_rect = Rect::new(item_rect.x + header_pad * 0.5, item_rect.y, item_rect.w - header_pad, item_rect.h);
+                let item_color = if is_selected { self.theme.primary } else { self.theme.text };
+                let item_color_a = Color::new(item_color.r, item_color.g, item_color.b, item_color.a * content_alpha);
+                self.paint_text(item_text_rect, item_label, item_font, item_color_a, TextAlign::Left);
+
+                // Click to select
+                if item_hovered && self.input.mouse_pressed {
+                    *selected = i;
+                    *open = false;
+                    changed = true;
+                }
+
+                item_y += item_h;
+            }
+        }
+
+        // Close if clicked outside when open
+        if *open && self.input.mouse_pressed && !self.is_hovered(&rect) {
+            *open = false;
+        }
+
+        changed
+    }
+
     // ── Tabs ──
 
     pub fn tab_bar(&mut self, id: u64, rect: Rect, labels: &[&str], selected: &mut usize) -> bool {
