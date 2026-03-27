@@ -113,6 +113,10 @@ fn resolve_image_fit(
 }
 
 impl OpenGlRenderer {
+    pub fn gl(&self) -> &Rc<glow::Context> {
+        &self.gl
+    }
+
     pub unsafe fn new(gl: Rc<glow::Context>) -> Result<Self, String> {
         let program = shader::create_program(&gl)?;
         let vbo = gl.create_buffer().map_err(|e| e.to_string())?;

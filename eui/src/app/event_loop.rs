@@ -109,7 +109,7 @@ impl ApplicationHandler for AppHandler {
 
         let gl_display = gl_config.display();
         let context_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::OpenGl(Some(Version::new(2, 1))))
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 2))))
             .build(raw_handle);
 
         let not_current_ctx = unsafe {
@@ -250,6 +250,12 @@ impl ApplicationHandler for AppHandler {
                 };
                 state.renderer.render(&draw_data, &metrics);
                 state.renderer.end_frame();
+
+                // Custom post-render callback (geometry shader flows, etc.)
+                if let Some(ref mut cb) = self.options.post_render {
+                    let gl = state.renderer.gl();
+                    cb(gl, fb_w as f32, fb_h as f32);
+                }
 
                 // Dump commands to JSON if P was pressed or first frame
                 if state.pending_dump_json || state.frame_index == 0 {

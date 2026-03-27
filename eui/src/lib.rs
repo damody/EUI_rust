@@ -16,6 +16,9 @@ pub mod quick;
 pub mod platform;
 pub mod app;
 
+// Re-export glow so downstream crates use the same version
+pub use glow;
+
 // Re-exports for convenience
 pub use color::{rgba, rgb, mix, Color};
 pub use rect::{Rect, SplitRects};

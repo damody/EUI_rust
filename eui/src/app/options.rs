@@ -13,6 +13,8 @@ pub struct AppOptions {
     pub icon_font_family: String,
     pub icon_font_file: Option<String>,
     pub enable_icon_font_fallback: bool,
+    /// Called after EUI rendering, before swap_buffers. Receives (gl, fb_width, fb_height).
+    pub post_render: Option<Box<dyn FnMut(&glow::Context, f32, f32)>>,
 }
 
 impl Default for AppOptions {
@@ -32,6 +34,7 @@ impl Default for AppOptions {
             icon_font_family: "Font Awesome 7 Free Solid".to_string(),
             icon_font_file: Some("include/Font Awesome 7 Free-Solid-900.otf".to_string()),
             enable_icon_font_fallback: true,
+            post_render: None,
         }
     }
 }
