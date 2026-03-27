@@ -264,6 +264,11 @@ impl ApplicationHandler for AppHandler {
                     );
                 }
 
+                // Apply title change if requested
+                if let Some(ref new_title) = state.input.title_request {
+                    state.window.set_title(new_title);
+                }
+
                 // Write clipboard_out to system clipboard if non-empty
                 if !state.input.clipboard_out.is_empty() {
                     if let Some(cb) = state.clipboard.as_mut() {
@@ -297,6 +302,8 @@ impl ApplicationHandler for AppHandler {
                 state.input.key_cut = false;
                 state.input.key_paste = false;
                 state.input.clipboard_text.clear();
+                state.input.dropped_files.clear();
+                state.input.title_request = None;
 
                 // Request continuous redraws
                 state.window.request_redraw();
@@ -410,6 +417,10 @@ impl ApplicationHandler for AppHandler {
                         NonZeroU32::new(new_size.height).unwrap(),
                     );
                 }
+                state.window.request_redraw();
+            }
+            WindowEvent::DroppedFile(path) => {
+                state.input.dropped_files.push(path);
                 state.window.request_redraw();
             }
             _ => {}

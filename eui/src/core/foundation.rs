@@ -167,4 +167,6 @@ pub struct InputState {
     pub clipboard_text: String,
     pub clipboard_out: String,
     pub time_seconds: f64,
+    pub dropped_files: Vec<std::path::PathBuf>,
+    pub title_request: Option<String>,
 }
