@@ -1,0 +1,4 @@
+[submodule "perfetto-viewer"]
+	path = perfetto-viewer
+	url = https://github.com/damody/perfetto-viewer.git
+	branch = master
