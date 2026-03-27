@@ -675,6 +675,34 @@ impl RendererBackend for OpenGlRenderer {
                         draw_line(&mut verts, bx0, by0, bx1, by1);
                         self.flush_vertices(&verts, TextureMode::None, None);
                     }
+                    CommandType::Line => {
+                        // rect.x/y = start, rect.w/h = end (repurposed)
+                        let x0 = cmd.rect.x;
+                        let y0 = cmd.rect.y;
+                        let x1 = cmd.rect.w;
+                        let y1 = cmd.rect.h;
+                        let half_t = cmd.thickness.max(0.5) * 0.5;
+                        let c = &cmd.color;
+
+                        let dx = x1 - x0;
+                        let dy = y1 - y0;
+                        let len = (dx * dx + dy * dy).sqrt().max(0.001);
+                        let px = -dy / len * half_t;
+                        let py = dx / len * half_t;
+
+                        let v = |x: f32, y: f32| -> Vertex {
+                            Vertex { x, y, u: 0.0, v: 0.0, r: c.r, g: c.g, b: c.b, a: c.a }
+                        };
+                        let verts = vec![
+                            v(x0 - px, y0 - py),
+                            v(x0 + px, y0 + py),
+                            v(x1 + px, y1 + py),
+                            v(x0 - px, y0 - py),
+                            v(x1 + px, y1 + py),
+                            v(x1 - px, y1 - py),
+                        ];
+                        self.flush_vertices(&verts, TextureMode::None, None);
+                    }
                 }
             }
         }

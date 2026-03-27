@@ -12,6 +12,9 @@ pub enum CommandType {
     Text,
     ImageRect,
     Chevron,
+    /// Line segment: rect.x/y = start point, radius/thickness = end point x/y (repurposed),
+    /// thickness stored in blur_radius, color = line color.
+    Line,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -349,6 +349,23 @@ impl Context {
         self.push_command_with_clip(cmd, None)
     }
 
+    /// Draw a line segment from (x0,y0) to (x1,y1) with given color and thickness.
+    pub fn paint_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Color, thickness: f32) -> usize {
+        let half = thickness * 0.5;
+        let min_x = x0.min(x1) - half;
+        let min_y = y0.min(y1) - half;
+        let max_x = x0.max(x1) + half;
+        let max_y = y0.max(y1) + half;
+        self.push_command(DrawCommand {
+            command_type: CommandType::Line,
+            rect: Rect::new(x0, y0, x1, y1), // start=(x,y), end=(w,h) repurposed
+            visible_rect: Rect::new(min_x, min_y, max_x - min_x, max_y - min_y),
+            color,
+            thickness,
+            ..Default::default()
+        })
+    }
+
     pub fn paint_filled_rect(&mut self, rect: Rect, color: Color, radius: f32) -> usize {
         self.push_command(DrawCommand {
             command_type: CommandType::FilledRect,
@@ -1507,6 +1524,10 @@ impl Context {
 
     pub fn input(&self) -> &InputState {
         &self.input
+    }
+
+    pub fn input_mut(&mut self) -> &mut InputState {
+        &mut self.input
     }
 
     pub fn viewport_size(&self) -> (f32, f32) {
