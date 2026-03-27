@@ -352,6 +352,10 @@ impl ApplicationHandler for AppHandler {
                         Key::Named(NamedKey::End) => state.input.key_end = true,
                         Key::Named(NamedKey::Shift) => state.input.key_shift = true,
                         Key::Named(NamedKey::Control) => state.key_ctrl = true,
+                        Key::Character(ref c) if !state.key_ctrl && matches!(c.as_str(), "w" | "W") => state.input.key_w = true,
+                        Key::Character(ref c) if !state.key_ctrl && matches!(c.as_str(), "a" | "A") => state.input.key_a = true,
+                        Key::Character(ref c) if !state.key_ctrl && matches!(c.as_str(), "s" | "S") => state.input.key_s = true,
+                        Key::Character(ref c) if !state.key_ctrl && matches!(c.as_str(), "d" | "D") => state.input.key_d = true,
                         Key::Character(ref c) if state.key_ctrl => {
                             match c.as_str() {
                                 "a" | "A" => state.input.key_select_all = true,
@@ -389,6 +393,10 @@ impl ApplicationHandler for AppHandler {
                     match event.logical_key {
                         Key::Named(NamedKey::Shift) => state.input.key_shift = false,
                         Key::Named(NamedKey::Control) => state.key_ctrl = false,
+                        Key::Character(ref c) if matches!(c.as_str(), "w" | "W") => state.input.key_w = false,
+                        Key::Character(ref c) if matches!(c.as_str(), "a" | "A") => state.input.key_a = false,
+                        Key::Character(ref c) if matches!(c.as_str(), "s" | "S") => state.input.key_s = false,
+                        Key::Character(ref c) if matches!(c.as_str(), "d" | "D") => state.input.key_d = false,
                         _ => {}
                     }
                 }
