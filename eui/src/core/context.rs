@@ -1612,11 +1612,35 @@ impl Context {
         self.text_input_field_ex(id, rect, "", text, "")
     }
 
+    /// Read-only selectable text field. Supports mouse selection and Ctrl+C copy,
+    /// but all mutations (typing, paste, cut, backspace, delete) are discarded.
+    pub fn selectable_text(&mut self, id: u64, rect: Rect, text: &str) {
+        let mut buf = text.to_string();
+        self.text_input_impl(id, rect, "", &mut buf, "", true, None, None);
+    }
+
+    /// Read-only selectable text with custom font size and color.
+    pub fn selectable_text_styled(&mut self, id: u64, rect: Rect, text: &str, font_size: f32, color: Color) {
+        let mut buf = text.to_string();
+        self.text_input_impl(id, rect, "", &mut buf, "", true, Some(font_size), Some(color));
+    }
+
+    pub fn selectable_text_ex(&mut self, id: u64, rect: Rect, label: &str, text: &str) {
+        let mut buf = text.to_string();
+        self.text_input_impl(id, rect, label, &mut buf, "", true, None, None);
+    }
+
     #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
     pub fn text_input_field_ex(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str) -> bool {
+        self.text_input_impl(id, rect, label, text, placeholder, false, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+    fn text_input_impl(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str,
+                        read_only: bool, font_override: Option<f32>, color_override: Option<Color>) -> bool {
         // Font sizing matching C++
         let label_font = (rect.h * 0.40).clamp(13.0, 24.0);
-        let value_font = (label_font - 0.5_f32).max(12.0);
+        let value_font = font_override.unwrap_or((label_font - 0.5_f32).max(12.0));
         let input_padding = (rect.h * 0.18).clamp(6.0, 12.0);
         let has_label = !label.is_empty();
         let content_padding = input_padding;
@@ -1665,9 +1689,11 @@ impl Context {
         let mut preferred_x = ta_state.preferred_x;
 
         // ── Compute layout params ──
-        let text_col = self.theme.text;
+        let text_col = color_override.unwrap_or(self.theme.text);
         let muted_col = self.theme.muted_text;
-        let render_font = if is_multiline {
+        let render_font = if let Some(fs) = font_override {
+            fs
+        } else if is_multiline {
             (input_rect.h * 0.13).clamp(13.0, 22.0)
         } else {
             value_font
@@ -1679,16 +1705,18 @@ impl Context {
         };
         let line_h = render_font + 5.0;
 
-        // Input chrome
+        // Input chrome (skip for read-only to preserve plain text appearance)
         let input_bg = self.theme.input_bg;
         let chrome_radius = (self.theme.radius - 2.0).max(0.0);
-        let chrome_id = if is_multiline { 0x1a2b3c4d5e6f7010 } else { 0x1a2b3c4d5e6f7007 };
-        self.draw_input_chrome(
-            context_hash_mix(id, chrome_id),
-            input_rect, hovered || editing, editing,
-            if is_multiline { mix(input_bg, self.theme.secondary, 0.08) } else { input_bg },
-            chrome_radius, if editing { 1.2 } else { 1.0 },
-        );
+        if !read_only {
+            let chrome_id = if is_multiline { 0x1a2b3c4d5e6f7010 } else { 0x1a2b3c4d5e6f7007 };
+            self.draw_input_chrome(
+                context_hash_mix(id, chrome_id),
+                input_rect, hovered || editing, editing,
+                if is_multiline { mix(input_bg, self.theme.secondary, 0.08) } else { input_bg },
+                chrome_radius, if editing { 1.2 } else { 1.0 },
+            );
+        }
 
         // ── Compute wrapped lines for multiline ──
         let content_w = if is_multiline {
@@ -1845,104 +1873,108 @@ impl Context {
                 self.input.clipboard_out = text[sel_min..sel_max].to_string();
             }
 
-            // ── Cut ──
+            // ── Cut (read-only: copy only, no mutation) ──
             if self.input.key_cut && has_selection {
                 self.input.clipboard_out = text[sel_min..sel_max].to_string();
-                text.replace_range(sel_min..sel_max, "");
-                cursor = sel_min;
-                sel_start = sel_min;
-                changed = true;
-                preferred_x = -1.0;
-            }
-
-            // ── Paste ──
-            if self.input.key_paste && !self.input.clipboard_text.is_empty() {
-                let paste_text = self.input.clipboard_text.clone();
-                // Single-line: strip newlines
-                let paste_text = if !is_multiline {
-                    paste_text.replace('\n', " ").replace('\r', "")
-                } else {
-                    paste_text.replace('\r', "")
-                };
-                if has_selection {
-                    text.replace_range(sel_min..sel_max, &paste_text);
-                    cursor = sel_min + paste_text.len();
-                } else {
-                    text.insert_str(cursor, &paste_text);
-                    cursor += paste_text.len();
-                }
-                sel_start = cursor;
-                changed = true;
-                preferred_x = -1.0;
-            }
-
-            // ── Text input (typing) ──
-            if !self.input.text_input.is_empty() {
-                let typed = self.input.text_input.clone();
-                if has_selection {
-                    text.replace_range(sel_min..sel_max, &typed);
-                    cursor = sel_min + typed.len();
-                } else {
-                    text.insert_str(cursor, &typed);
-                    cursor += typed.len();
-                }
-                sel_start = cursor;
-                changed = true;
-                preferred_x = -1.0;
-            }
-
-            // ── Backspace ──
-            if self.input.key_backspace {
-                if has_selection {
+                if !read_only {
                     text.replace_range(sel_min..sel_max, "");
                     cursor = sel_min;
                     sel_start = sel_min;
                     changed = true;
-                } else if cursor > 0 {
-                    let mut prev = cursor - 1;
-                    while prev > 0 && !text.is_char_boundary(prev) { prev -= 1; }
-                    text.replace_range(prev..cursor, "");
-                    cursor = prev;
-                    sel_start = prev;
-                    changed = true;
+                    preferred_x = -1.0;
                 }
-                preferred_x = -1.0;
             }
 
-            // ── Delete ──
-            if self.input.key_delete {
-                if has_selection {
-                    text.replace_range(sel_min..sel_max, "");
-                    cursor = sel_min;
-                    sel_start = sel_min;
-                    changed = true;
-                } else if cursor < text.len() {
-                    let mut next = cursor + 1;
-                    while next < text.len() && !text.is_char_boundary(next) { next += 1; }
-                    text.replace_range(cursor..next, "");
-                    changed = true;
-                }
-                preferred_x = -1.0;
-            }
-
-            // ── Enter (multiline only) ──
-            if self.input.key_enter {
-                if is_multiline {
-                    if has_selection {
-                        text.replace_range(sel_min..sel_max, "\n");
-                        cursor = sel_min + 1;
+            if !read_only {
+                // ── Paste ──
+                if self.input.key_paste && !self.input.clipboard_text.is_empty() {
+                    let paste_text = self.input.clipboard_text.clone();
+                    // Single-line: strip newlines
+                    let paste_text = if !is_multiline {
+                        paste_text.replace('\n', " ").replace('\r', "")
                     } else {
-                        text.insert(cursor, '\n');
-                        cursor += 1;
+                        paste_text.replace('\r', "")
+                    };
+                    if has_selection {
+                        text.replace_range(sel_min..sel_max, &paste_text);
+                        cursor = sel_min + paste_text.len();
+                    } else {
+                        text.insert_str(cursor, &paste_text);
+                        cursor += paste_text.len();
                     }
                     sel_start = cursor;
                     changed = true;
                     preferred_x = -1.0;
-                } else {
-                    // Single-line: lose focus on Enter
-                    self.focus_id = 0;
                 }
-            }
+
+                // ── Text input (typing) ──
+                if !self.input.text_input.is_empty() {
+                    let typed = self.input.text_input.clone();
+                    if has_selection {
+                        text.replace_range(sel_min..sel_max, &typed);
+                        cursor = sel_min + typed.len();
+                    } else {
+                        text.insert_str(cursor, &typed);
+                        cursor += typed.len();
+                    }
+                    sel_start = cursor;
+                    changed = true;
+                    preferred_x = -1.0;
+                }
+
+                // ── Backspace ──
+                if self.input.key_backspace {
+                    if has_selection {
+                        text.replace_range(sel_min..sel_max, "");
+                        cursor = sel_min;
+                        sel_start = sel_min;
+                        changed = true;
+                    } else if cursor > 0 {
+                        let mut prev = cursor - 1;
+                        while prev > 0 && !text.is_char_boundary(prev) { prev -= 1; }
+                        text.replace_range(prev..cursor, "");
+                        cursor = prev;
+                        sel_start = prev;
+                        changed = true;
+                    }
+                    preferred_x = -1.0;
+                }
+
+                // ── Delete ──
+                if self.input.key_delete {
+                    if has_selection {
+                        text.replace_range(sel_min..sel_max, "");
+                        cursor = sel_min;
+                        sel_start = sel_min;
+                        changed = true;
+                    } else if cursor < text.len() {
+                        let mut next = cursor + 1;
+                        while next < text.len() && !text.is_char_boundary(next) { next += 1; }
+                        text.replace_range(cursor..next, "");
+                        changed = true;
+                    }
+                    preferred_x = -1.0;
+                }
+
+                // ── Enter (multiline only) ──
+                if self.input.key_enter {
+                    if is_multiline {
+                        if has_selection {
+                            text.replace_range(sel_min..sel_max, "\n");
+                            cursor = sel_min + 1;
+                        } else {
+                            text.insert(cursor, '\n');
+                            cursor += 1;
+                        }
+                        sel_start = cursor;
+                        changed = true;
+                        preferred_x = -1.0;
+                    } else {
+                        // Single-line: lose focus on Enter
+                        self.focus_id = 0;
+                    }
+                }
+            } // end if !read_only
 
             // ── Escape: lose focus ──
             if self.input.key_escape {
@@ -2019,11 +2051,14 @@ impl Context {
             } else {
                 track_rect.y
             };
-            let secondary = self.theme.secondary;
-            let panel = self.theme.panel;
-            let primary = self.theme.primary;
-            self.paint_filled_rect(track_rect, mix(secondary, panel, 0.45), 3.0);
-            self.paint_filled_rect(Rect::new(track_rect.x, thumb_y, track_rect.w, thumb_h), mix(primary, panel, 0.40), 3.0);
+            // Hide scrollbar for read-only when content fits
+            if !read_only || max_scroll > 0.0 {
+                let secondary = self.theme.secondary;
+                let panel = self.theme.panel;
+                let primary = self.theme.primary;
+                self.paint_filled_rect(track_rect, mix(secondary, panel, 0.45), 3.0);
+                self.paint_filled_rect(Rect::new(track_rect.x, thumb_y, track_rect.w, thumb_h), mix(primary, panel, 0.40), 3.0);
+            }
 
             // Selection highlight + text lines
             let sel_min = cursor.min(sel_start);

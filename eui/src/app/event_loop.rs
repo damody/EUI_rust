@@ -238,6 +238,12 @@ impl ApplicationHandler for AppHandler {
 
                 state.ctx.end_frame();
 
+                // Sync clipboard_out from context back to state
+                // (begin_frame clones input, so ctx modifies a copy)
+                if !state.ctx.input().clipboard_out.is_empty() {
+                    state.input.clipboard_out = state.ctx.input().clipboard_out.clone();
+                }
+
                 // Render
                 let bg = state.ctx.theme().background;
                 let clear = ClearState { r: bg.r, g: bg.g, b: bg.b, a: bg.a, clear_color: true };
