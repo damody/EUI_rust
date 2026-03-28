@@ -243,6 +243,12 @@ impl ApplicationHandler for AppHandler {
                 let clear = ClearState { r: bg.r, g: bg.g, b: bg.b, a: bg.a, clear_color: true };
                 state.renderer.begin_frame(&metrics, &clear);
 
+                // Custom pre-render callback (GPU slice rects, etc.)
+                if let Some(ref mut cb) = self.options.pre_render {
+                    let gl = state.renderer.gl();
+                    cb(gl, fb_w as f32, fb_h as f32);
+                }
+
                 let draw_data = DrawDataView {
                     commands: state.ctx.commands(),
                     text_arena: state.ctx.text_arena(),
