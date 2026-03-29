@@ -133,6 +133,16 @@ pub fn make_theme(mode: ThemeMode, primary: &Color) -> Theme {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorIcon {
+    #[default]
+    Default,
+    EWResize,
+    NSResize,
+    Pointer,
+    Crosshair,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
     pub mouse_x: f32,
@@ -169,4 +179,5 @@ pub struct InputState {
     pub time_seconds: f64,
     pub dropped_files: Vec<std::path::PathBuf>,
     pub title_request: Option<String>,
+    pub cursor_icon: CursorIcon,
 }

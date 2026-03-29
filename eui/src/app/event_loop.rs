@@ -272,6 +272,20 @@ impl ApplicationHandler for AppHandler {
                     state.window.set_title(new_title);
                 }
 
+                // Apply cursor icon
+                {
+                    use crate::core::foundation::CursorIcon as CI;
+                    let winit_cursor = match state.input.cursor_icon {
+                        CI::Default => winit::window::CursorIcon::Default,
+                        CI::EWResize => winit::window::CursorIcon::EwResize,
+                        CI::NSResize => winit::window::CursorIcon::NsResize,
+                        CI::Pointer => winit::window::CursorIcon::Pointer,
+                        CI::Crosshair => winit::window::CursorIcon::Crosshair,
+                    };
+                    state.window.set_cursor(winit_cursor);
+                    state.input.cursor_icon = CI::Default;
+                }
+
                 // Write clipboard_out to system clipboard if non-empty
                 if !state.input.clipboard_out.is_empty() {
                     if let Some(cb) = state.clipboard.as_mut() {
