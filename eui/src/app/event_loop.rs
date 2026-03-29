@@ -35,7 +35,6 @@ struct AppState {
     start_time: std::time::Instant,
     frame_index: u64,
     _redraw_needed: bool,
-    pending_dump_json: bool,
     clipboard: Option<arboard::Clipboard>,
     key_ctrl: bool,
 }
@@ -194,7 +193,6 @@ impl ApplicationHandler for AppHandler {
             start_time: std::time::Instant::now(),
             frame_index: 0,
             _redraw_needed: true,
-            pending_dump_json: false,
             clipboard: arboard::Clipboard::new().ok(),
             key_ctrl: false,
         });
@@ -267,19 +265,6 @@ impl ApplicationHandler for AppHandler {
                 if let Some(ref mut cb) = self.options.post_render {
                     let gl = state.renderer.gl();
                     cb(gl, fb_w as f32, fb_h as f32);
-                }
-
-                // Dump commands to JSON if P was pressed or first frame
-                if state.pending_dump_json || state.frame_index == 0 {
-                    state.pending_dump_json = false;
-                    let path = std::path::Path::new("eui_dump_rust.json");
-                    crate::core::debug_dump::dump_commands_json(
-                        state.ctx.commands(),
-                        state.ctx.text_arena(),
-                        state.ctx.brush_payloads(),
-                        state.ctx.transform_payloads(),
-                        path,
-                    );
                 }
 
                 // Apply title change if requested
@@ -394,11 +379,6 @@ impl ApplicationHandler for AppHandler {
                                         .unwrap_or_default();
                                 }
                                 _ => {}
-                            }
-                        }
-                        Key::Character(ref c) if c.as_str() == "p" || c.as_str() == "P" => {
-                            if state.ctx.focus_id == 0 {
-                                state.pending_dump_json = true;
                             }
                         }
                         _ => {}
