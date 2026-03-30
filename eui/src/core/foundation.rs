@@ -169,6 +169,7 @@ pub struct InputState {
     pub key_cut: bool,
     pub key_paste: bool,
     pub key_shift: bool,
+    pub key_ctrl: bool,
     pub key_w: bool,
     pub key_a: bool,
     pub key_s: bool,
