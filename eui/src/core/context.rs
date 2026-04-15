@@ -1530,6 +1530,16 @@ impl Context {
         &mut self.input
     }
 
+    /// Programmatically set keyboard focus to the widget with the given id.
+    pub fn set_focus(&mut self, id: u64) {
+        self.focus_id = id;
+    }
+
+    /// Check if a specific widget currently has keyboard focus.
+    pub fn has_focus(&self, id: u64) -> bool {
+        self.focus_id == id
+    }
+
     pub fn viewport_size(&self) -> (f32, f32) {
         (self.viewport_w, self.viewport_h)
     }
@@ -1633,6 +1643,12 @@ impl Context {
     #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
     pub fn text_input_field_ex(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str) -> bool {
         self.text_input_impl(id, rect, label, text, placeholder, false, None, None)
+    }
+
+    /// Text input field with custom font size.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_input_field_styled(&mut self, id: u64, rect: Rect, label: &str, text: &mut String, placeholder: &str, font_size: f32) -> bool {
+        self.text_input_impl(id, rect, label, text, placeholder, false, Some(font_size), None)
     }
 
     #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
