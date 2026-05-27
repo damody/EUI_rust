@@ -146,11 +146,7 @@ impl ApplicationHandler for AppHandler {
         let mut renderer = unsafe { OpenGlRenderer::new(gl).expect("failed to create OpenGL renderer") };
 
         // Load font: user-specified file, or fall back to system default
-        let font_data = if let Some(ref font_file) = self.options.text_font_file {
-            std::fs::read(font_file).ok()
-        } else {
-            load_system_default_font()
-        };
+        let font_data = load_text_font_data(&self.options.text_font_file);
         let mut ctx = Context::new();
         if let Some(data) = font_data {
             if let Some(measurer) = TextMeasurer::new(&data) {
@@ -440,10 +436,50 @@ impl ApplicationHandler for AppHandler {
     }
 }
 
+fn load_text_font_data(explicit_file: &Option<String>) -> Option<Vec<u8>> {
+    if let Some(font_file) = explicit_file {
+        if let Ok(data) = std::fs::read(font_file) {
+            if TextMeasurer::new(&data).is_some() {
+                return Some(data);
+            }
+        }
+    }
+
+    load_system_default_font()
+}
+
+fn load_first_parseable_font(candidates: &[&str]) -> Option<Vec<u8>> {
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            if text_font_data_has_required_glyphs(&data) {
+                return Some(data);
+            }
+        }
+    }
+    None
+}
+
+fn text_font_data_has_required_glyphs(data: &[u8]) -> bool {
+    let Some(measurer) = TextMeasurer::new(data) else {
+        return false;
+    };
+
+    measurer.font().has_glyph('A') && measurer.font().has_glyph('每')
+}
+
+fn load_first_existing_font(candidates: &[&str]) -> Option<Vec<u8>> {
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            return Some(data);
+        }
+    }
+    None
+}
+
 /// Try to load a default system font.
 /// Windows: Segoe UI → Arial → Tahoma
 /// macOS: SF Pro / Helvetica Neue
-/// Linux: DejaVu Sans / Noto Sans / Liberation Sans
+/// Linux: prefer CJK-capable Noto/WenQuanYi fonts, then Latin fallbacks.
 fn load_system_default_font() -> Option<Vec<u8>> {
     let candidates: &[&str] = if cfg!(target_os = "windows") {
         &[
@@ -463,6 +499,15 @@ fn load_system_default_font() -> Option<Vec<u8>> {
     } else {
         // Linux / other
         &[
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+            "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
@@ -471,12 +516,43 @@ fn load_system_default_font() -> Option<Vec<u8>> {
         ]
     };
 
-    for path in candidates {
-        if let Ok(data) = std::fs::read(path) {
-            return Some(data);
-        }
+    load_first_parseable_font(candidates).or_else(|| load_first_existing_font(candidates))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_explicit_text_font_falls_back_to_system_font() {
+        let font_data = load_text_font_data(&Some(
+            "/definitely/missing/eui-font-for-regression-test.ttf".to_string(),
+        ));
+
+        assert!(font_data.is_some());
     }
-    None
+
+    #[test]
+    fn fallback_text_font_is_parseable() {
+        let font_data = load_text_font_data(&Some(
+            "/definitely/missing/eui-font-for-regression-test.ttf".to_string(),
+        ))
+        .expect("fallback font data");
+
+        assert!(TextMeasurer::new(&font_data).is_some());
+    }
+
+    #[test]
+    fn fallback_text_font_has_latin_and_cjk_glyphs() {
+        let font_data = load_text_font_data(&Some(
+            "/definitely/missing/eui-font-for-regression-test.ttf".to_string(),
+        ))
+        .expect("fallback font data");
+        let measurer = TextMeasurer::new(&font_data).expect("parseable fallback font");
+
+        assert!(measurer.font().has_glyph('A'));
+        assert!(measurer.font().has_glyph('每'));
+    }
 }
 
 /// Resolve and load icon font file, trying multiple candidate paths
